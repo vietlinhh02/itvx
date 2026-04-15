@@ -269,6 +269,140 @@ tablet: 640px - 1024px (sm:, md:)
 desktop: > 1024px (lg:, xl:)
 ```
 
+## State Management with Zustand
+
+**KHÔNG DÙNG useEffect** - Luôn dùng Zustand cho state management
+
+### Installation
+
+```bash
+cd frontend
+pnpm add zustand
+```
+
+### Store Pattern
+
+```tsx
+// stores/authStore.ts
+import { create } from "zustand"
+
+interface AuthState {
+  // State
+  isLoading: boolean
+  error: string | null
+  user: User | null
+  
+  // Actions
+  setLoading: (loading: boolean) => void
+  setError: (error: string | null) => void
+  setUser: (user: User | null) => void
+  login: () => Promise<void>
+  logout: () => Promise<void>
+}
+
+export const useAuthStore = create<AuthState>((set) => ({
+  isLoading: false,
+  error: null,
+  user: null,
+  
+  setLoading: (loading) => set({ isLoading: loading }),
+  setError: (error) => set({ error }),
+  setUser: (user) => set({ user }),
+  
+  login: async () => {
+    set({ isLoading: true, error: null })
+    try {
+      // API call logic
+      const user = await api.login()
+      set({ user, isLoading: false })
+    } catch (error) {
+      set({ error: error.message, isLoading: false })
+    }
+  },
+  
+  logout: async () => {
+    set({ isLoading: true })
+    try {
+      await api.logout()
+      set({ user: null, isLoading: false })
+    } catch (error) {
+      set({ error: error.message, isLoading: false })
+    }
+  },
+}))
+```
+
+### Usage in Components
+
+```tsx
+// Good: Use Zustand store
+"use client"
+
+import { useAuthStore } from "@/stores/authStore"
+
+export default function LoginButton() {
+  const { login, isLoading } = useAuthStore()
+  
+  return (
+    <button onClick={login} disabled={isLoading}>
+      {isLoading ? "Loading..." : "Login"}
+    </button>
+  )
+}
+```
+
+```tsx
+// Bad: Using useEffect for side effects
+"use client"
+
+import { useEffect, useState } from "react" // ❌ DON'T
+
+export default function BadComponent() {
+  const [data, setData] = useState(null) // ❌ DON'T
+  
+  useEffect(() => { // ❌ DON'T - Avoid useEffect
+    fetchData().then(setData)
+  }, [])
+  
+  return <div>{data}</div>
+}
+```
+
+### When to use Zustand
+
+| Use Case | Solution |
+|----------|----------|
+| Form state | Zustand store |
+| API calls | Zustand actions |
+| UI state (modal, sidebar) | Zustand store |
+| User auth state | Zustand store |
+| Loading states | Zustand store |
+
+### Store Organization
+
+```
+stores/
+├── authStore.ts       # Authentication state
+├── uiStore.ts         # UI state (modals, sidebar)
+├── interviewStore.ts  # Interview-related state
+└── index.ts           # Re-exports
+```
+
+### Rules
+
+1. **Mọi component phải là Client Component** (`"use client"`) nếu cần interactivity
+2. **Không dùng useEffect** cho data fetching hay side effects
+3. **Luôn dùng Zustand actions** thay vì useEffect
+4. **Select only what you need** từ store để tránh re-renders
+
+```tsx
+// Good: Select specific state
+const user = useAuthStore((state) => state.user)
+
+// Bad: Select entire store (causes re-renders)
+const store = useAuthStore() // ❌ DON'T
+```
+
 ## Do's and Don'ts
 
 ### DO
@@ -278,6 +412,8 @@ desktop: > 1024px (lg:, xl:)
 - Use semantic HTML
 - Provide hover states
 - Use loading skeletons
+- **Use Zustand for all state management**
+- **Use Client Components with Zustand**
 
 ### DON'T
 - Use emojis
@@ -287,6 +423,8 @@ desktop: > 1024px (lg:, xl:)
 - Use more than 3 font weights on a page
 - Use borders heavier than 1px
 - Use arbitrary values (e.g., w-[123px])
+- **Use useEffect (hạn chế tối đa)**
+- **Use Server Actions cho interactive features**
 
 ## Example: Complete Page Structure
 
