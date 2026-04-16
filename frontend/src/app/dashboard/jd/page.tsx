@@ -1,9 +1,10 @@
+import { getServerSession } from "next-auth"
 import type { Route } from "next"
 import Link from "next/link"
 import { redirect } from "next/navigation"
 
 import { JDUploadPanel } from "@/components/jd/jd-upload-panel"
-import { auth } from "@/lib/auth"
+import { authOptions } from "@/lib/auth-options"
 
 const backendBaseUrl = process.env.API_URL ?? process.env.NEXT_PUBLIC_API_URL
 
@@ -16,7 +17,7 @@ type JDRecentItem = {
 }
 
 export default async function JDDashboardPage() {
-  const session = await auth()
+  const session = await getServerSession(authOptions)
 
   if (!session?.accessToken || !backendBaseUrl) {
     redirect("/login")

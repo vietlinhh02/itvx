@@ -11,12 +11,11 @@
     "type-check": "tsc --noEmit"
   },
   "dependencies": {
-    "@auth/core": "0.37.0",
     "@phosphor-icons/react": "^2.1.10",
-    "next": "15.5.15",
-    "next-auth": "5.0.0-beta.25",
-    "react": "18.3.1",
-    "react-dom": "18.3.1",
+    "next": "16.2.4",
+    "next-auth": "4.24.14",
+    "react": "19.2.5",
+    "react-dom": "19.2.5",
     "tailwindcss": "^4.0.0",
     "zustand": "^5.0.12"
   },
@@ -24,10 +23,10 @@
     "@eslint/eslintrc": "^3.3.5",
     "@tailwindcss/postcss": "^4.0.0",
     "@types/node": "^22.10.0",
-    "@types/react": "18.3.12",
-    "@types/react-dom": "18.3.1",
+    "@types/react": "19.2.14",
+    "@types/react-dom": "19.2.3",
     "eslint": "^9.39.1",
-    "eslint-config-next": "15.5.15",
+    "eslint-config-next": "16.2.4",
     "typescript": "^5.7.0"
   }
 }
