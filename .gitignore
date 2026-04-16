@@ -257,6 +257,9 @@ notes.md
 TODO.md
 NOTES.md
 
+# Local worktrees
+.worktrees/
+
 # Backup files
 *.bak
 *.backup
