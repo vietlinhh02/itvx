@@ -1,5 +1,7 @@
 """Application configuration."""
 
+from pathlib import Path
+
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
@@ -31,10 +33,19 @@ class Settings(BaseSettings):
     app_port: int = 8000
     cors_origins: str = "http://localhost:3000"
 
+    # CV uploads
+    cv_upload_dir: str = "storage/cv"
+    cv_max_upload_size_bytes: int = 10 * 1024 * 1024
+
     @property
     def cors_origins_list(self) -> list[str]:
         """Parse CORS origins from comma-separated string."""
         return [origin.strip() for origin in self.cors_origins.split(",")]
+
+    @property
+    def cv_upload_path(self) -> Path:
+        """Resolve the CV upload directory path."""
+        return Path(self.cv_upload_dir).resolve()
 
 
 settings = Settings()
