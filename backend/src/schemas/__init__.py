@@ -1,21 +1,28 @@
 """Schemas."""
 
-from src.schemas.auth import (
-    GoogleTokenRequest,
-    GoogleUserInfo,
-    RefreshTokenRequest,
-    TokenResponse,
-    UserWithTokens,
+from src.schemas.auth import GoogleTokenRequest as GoogleAuthRequest, TokenResponse
+from src.schemas.cv import (
+    CVScreeningPayload,
+    CVScreeningResponse,
+    CandidateProfilePayload,
+    MinimumRequirementCheck,
+    RequirementStatus,
+    ScreeningRecommendation,
 )
-from src.schemas.user import UserCreate, UserResponse, UserUpdate
+from src.schemas.jd import JDAnalysisPayload, JDAnalysisResponse, JDRecentItem
+from src.schemas.user import UserResponse
 
 __all__ = [
-    "GoogleTokenRequest",
-    "GoogleUserInfo",
-    "RefreshTokenRequest",
+    "CVScreeningPayload",
+    "CVScreeningResponse",
+    "CandidateProfilePayload",
+    "GoogleAuthRequest",
+    "JDAnalysisPayload",
+    "JDAnalysisResponse",
+    "JDRecentItem",
+    "MinimumRequirementCheck",
+    "RequirementStatus",
+    "ScreeningRecommendation",
     "TokenResponse",
-    "UserWithTokens",
-    "UserCreate",
     "UserResponse",
-    "UserUpdate",
 ]
