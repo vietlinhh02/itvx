@@ -1,3 +1,4 @@
+import { getServerSession } from "next-auth"
 import { notFound, redirect } from "next/navigation"
 
 import { CVScreeningDetail } from "@/components/jd/cv-screening-detail"
@@ -5,7 +6,7 @@ import type {
   CVScreeningHistoryResponse,
   CVScreeningResponse,
 } from "@/components/jd/cv-screening-types"
-import { auth } from "@/lib/auth"
+import { authOptions } from "@/lib/auth-options"
 
 const backendBaseUrl = process.env.API_URL ?? process.env.NEXT_PUBLIC_API_URL
 
@@ -14,7 +15,7 @@ type CVScreeningDetailPageProps = {
 }
 
 export default async function CVScreeningDetailPage({ params }: CVScreeningDetailPageProps) {
-  const session = await auth()
+  const session = await getServerSession(authOptions)
 
   if (!session?.accessToken || !backendBaseUrl) {
     redirect("/login")

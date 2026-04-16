@@ -1,6 +1,8 @@
+import { getServerSession } from "next-auth"
 import Link from "next/link"
 import { redirect } from "next/navigation"
-import { auth } from "@/lib/auth"
+
+import { authOptions } from "@/lib/auth-options"
 
 type BackendUser = {
   id: string
@@ -13,7 +15,7 @@ type BackendUser = {
 const backendBaseUrl = process.env.API_URL ?? process.env.NEXT_PUBLIC_API_URL
 
 export default async function DashboardPage() {
-  const session = await auth()
+  const session = await getServerSession(authOptions)
 
   if (!session?.accessToken || !backendBaseUrl) {
     redirect("/login")
