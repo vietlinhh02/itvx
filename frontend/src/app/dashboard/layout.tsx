@@ -1,46 +1,14 @@
-import { auth } from "@/lib/auth"
-import { redirect } from "next/navigation"
+import type { ReactNode } from "react"
 
-export default async function DashboardLayout({
-  children,
-}: {
-  children: React.ReactNode
-}) {
-  const session = await auth()
+import { DashboardHeader } from "@/components/dashboard/dashboard-header"
 
-  if (!session) {
-    redirect("/login")
-  }
-
+export default function DashboardLayout({ children }: { children: ReactNode }) {
   return (
-    <div className="min-h-screen bg-gray-100">
-      <header className="bg-white shadow">
-        <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8">
-          <div className="flex justify-between items-center h-16">
-            <h1 className="text-xl font-semibold">InterviewX Dashboard</h1>
-            <div className="flex items-center gap-4">
-              <span className="text-sm text-gray-600">
-                {session.user?.name || session.user?.email}
-              </span>
-              <form
-                action={async () => {
-                  "use server"
-                  const { signOut } = await import("@/lib/auth")
-                  await signOut({ redirectTo: "/login" })
-                }}
-              >
-                <button
-                  type="submit"
-                  className="text-sm text-red-600 hover:text-red-800"
-                >
-                  Sign out
-                </button>
-              </form>
-            </div>
-          </div>
-        </div>
-      </header>
-      <main className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 py-8">
+    <div className="flex h-screen h-[100dvh] flex-col overflow-hidden bg-[#f8f9fc]">
+      <div className="shrink-0 px-6 pt-8 xl:px-10">
+        <DashboardHeader />
+      </div>
+      <main className="flex-1 overflow-y-auto px-6 pb-8 xl:px-10 [&::-webkit-scrollbar]:hidden [-ms-overflow-style:none] [scrollbar-width:none]">
         {children}
       </main>
     </div>

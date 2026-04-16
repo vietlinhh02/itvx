@@ -1,12 +1,10 @@
 """SQLAlchemy base configuration."""
 
-from datetime import datetime
+from datetime import UTC, datetime
 from uuid import uuid4
 
 from sqlalchemy import String
 from sqlalchemy.orm import Mapped, mapped_column
-
-from src.database import Base
 
 
 class UUIDMixin:
@@ -19,11 +17,16 @@ class UUIDMixin:
     )
 
 
+def utc_naive_now(_: object | None = None) -> datetime:
+    """Return the current UTC time as a naive datetime for DB columns."""
+    return datetime.now(UTC).replace(tzinfo=None)
+
+
 class TimestampMixin:
     """Mixin for created/updated timestamps."""
 
-    created_at: Mapped[datetime] = mapped_column(default=datetime.utcnow)
+    created_at: Mapped[datetime] = mapped_column(default=utc_naive_now)
     updated_at: Mapped[datetime] = mapped_column(
-        default=datetime.utcnow,
-        onupdate=datetime.utcnow,
+        default=utc_naive_now,
+        onupdate=utc_naive_now,
     )
