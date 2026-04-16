@@ -12,6 +12,7 @@ from src.models import CandidateDocument, CandidateProfile, CandidateScreening
 from src.schemas.cv import (
     AuditMetadata,
     CandidateProfilePayload,
+    CVScreeningHistoryResponse,
     CVScreeningResponse,
     FollowUpQuestion,
     KnockoutAssessment,
@@ -157,3 +158,25 @@ def test_screening_recommendation_enum_values_are_stable() -> None:
     assert ScreeningRecommendation.ADVANCE == "advance"
     assert ScreeningRecommendation.REVIEW == "review"
     assert ScreeningRecommendation.REJECT == "reject"
+
+
+def test_cv_screening_history_response_validates() -> None:
+    """Validate the lightweight history response for saved screenings."""
+    payload = {
+        "items": [
+            {
+                "screening_id": "screening-1",
+                "jd_id": "jd-1",
+                "candidate_id": "candidate-1",
+                "file_name": "candidate.pdf",
+                "created_at": "2026-04-16T10:00:00+00:00",
+                "recommendation": "review",
+                "match_score": 0.76,
+            }
+        ]
+    }
+
+    validated = CVScreeningHistoryResponse.model_validate(payload)
+
+    assert validated.items[0].screening_id == "screening-1"
+    assert validated.items[0].recommendation == "review"

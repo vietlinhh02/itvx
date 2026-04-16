@@ -229,6 +229,24 @@ class StoredScreeningPayload(BaseModel):
     audit: AuditMetadata
 
 
+class CVScreeningHistoryItem(BaseModel):
+    """Lightweight metadata for one persisted screening."""
+
+    screening_id: str
+    jd_id: str
+    candidate_id: str
+    file_name: str
+    created_at: str
+    recommendation: ScreeningRecommendation
+    match_score: float = Field(ge=0, le=1)
+
+
+class CVScreeningHistoryResponse(BaseModel):
+    """List response for all screenings under one JD."""
+
+    items: list[CVScreeningHistoryItem]
+
+
 class CVScreeningResponse(BaseModel):
     """API response for a completed CV screening."""
 
@@ -248,6 +266,8 @@ __all__ = [
     "CandidateProfilePayload",
     "CandidateSummary",
     "CertificationItem",
+    "CVScreeningHistoryItem",
+    "CVScreeningHistoryResponse",
     "CVScreeningResponse",
     "DimensionScore",
     "EducationItem",

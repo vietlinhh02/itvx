@@ -15,6 +15,7 @@ from src.models.cv import CandidateDocument, CandidateProfile, CandidateScreenin
 from src.models.jd import JDAnalysis, JDDocument
 from src.schemas.cv import (
     CandidateProfilePayload,
+    CVScreeningHistoryItem,
     CVScreeningResponse,
     RequirementStatus,
     ScreeningRecommendation,
@@ -172,6 +173,58 @@ class CVScreeningService:
             result=payload.result,
             audit=payload.audit,
         )
+
+    async def list_screenings_for_jd(self, jd_id: str) -> list[CVScreeningHistoryItem]:
+        """Return persisted screenings for one JD in reverse chronological order."""
+        if self._db_session is None:
+            raise RuntimeError("CVScreeningService requires a database session")
+
+        statement = (
+            select(CandidateScreening, CandidateDocument)
+            .join(CandidateProfile, CandidateProfile.id == CandidateScreening.candidate_profile_id)
+            .join(CandidateDocument, CandidateDocument.id == CandidateProfile.candidate_document_id)
+            .where(CandidateScreening.jd_document_id == jd_id)
+            .order_by(CandidateScreening.created_at.desc())
+        )
+        rows = (await self._db_session.execute(statement)).all()
+
+        return [
+            self._build_screening_history_item(screening, candidate_document)
+            for screening, candidate_document in cast(
+                list[tuple[CandidateScreening, CandidateDocument]],
+                cast(object, rows),
+            )
+        ]
+
+    def _build_screening_history_item(
+        self,
+        screening: CandidateScreening,
+        candidate_document: CandidateDocument,
+    ) -> CVScreeningHistoryItem:
+        """Build a lightweight history item from a persisted screening row."""
+        recommendation, match_score = self._extract_history_summary(screening.screening_payload)
+        return CVScreeningHistoryItem(
+            screening_id=screening.id,
+            jd_id=screening.jd_document_id,
+            candidate_id=candidate_document.id,
+            file_name=candidate_document.file_name,
+            created_at=screening.created_at.replace(tzinfo=UTC).isoformat(),
+            recommendation=recommendation,
+            match_score=match_score,
+        )
+
+    def _extract_history_summary(
+        self,
+        screening_payload: dict[str, object],
+    ) -> tuple[ScreeningRecommendation, float]:
+        """Extract history summary fields from new or legacy screening payloads."""
+        try:
+            payload = StoredScreeningPayload.model_validate(screening_payload)
+            return payload.result.recommendation, payload.result.match_score
+        except Exception:
+            recommendation = ScreeningRecommendation(str(screening_payload["recommendation"]))
+            match_score = float(screening_payload["match_score"])
+            return recommendation, match_score
 
     async def _generate_screening_payload(
         self,
