@@ -9,7 +9,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from src.config import settings
 from src.database import get_db
-from src.schemas.cv import CVScreeningResponse
+from src.schemas.cv import CVScreeningHistoryResponse, CVScreeningResponse
 from src.services.cv_screening_service import CVScreeningService, JDNotReadyError
 
 router = APIRouter(prefix="/cv", tags=["cv"])
@@ -71,6 +71,17 @@ async def screen_cv(
         )
     except JDNotReadyError as exc:
         raise HTTPException(status_code=404, detail=str(exc)) from exc
+
+
+@router.get("/jd/{jd_id}/screenings", response_model=CVScreeningHistoryResponse)
+async def list_cv_screenings_for_jd(
+    jd_id: str,
+    db: Annotated[AsyncSession, Depends(get_db)],
+) -> CVScreeningHistoryResponse:
+    """Return all stored CV screenings for one JD."""
+    service = CVScreeningService(upload_dir=settings.cv_upload_path, db_session=db)
+    items = await service.list_screenings_for_jd(jd_id)
+    return CVScreeningHistoryResponse(items=items)
 
 
 @router.get("/screenings/{screening_id}", response_model=CVScreeningResponse)

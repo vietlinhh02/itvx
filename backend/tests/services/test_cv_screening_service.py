@@ -7,7 +7,7 @@ from langchain_core.messages import HumanMessage
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from src.models.cv import CandidateProfile, CandidateScreening
+from src.models.cv import CandidateDocument, CandidateProfile, CandidateScreening
 from src.models.jd import JDAnalysis, JDDocument
 from src.schemas.cv import CandidateProfilePayload, StoredScreeningPayload
 from src.schemas.jd import JDAnalysisPayload
@@ -467,6 +467,90 @@ async def test_get_screening_returns_phase_2_response(
 
     assert fetched is not None
     assert fetched.result.screening_summary.en == created.result.screening_summary.en
+
+
+@pytest.mark.asyncio
+async def test_list_screenings_for_jd_returns_newest_first(
+    db_session: AsyncSession,
+    tmp_path: Path,
+    seeded_jd_analysis_id: str,
+) -> None:
+    """Return persisted screenings for one JD in reverse chronological order."""
+    service = CVScreeningService(
+        extractor=FakePhase2CVExtractor(),
+        upload_dir=tmp_path,
+        db_session=db_session,
+    )
+    service._screening_llm = FakePhase2ScreeningInvoker()  # pyright: ignore[reportPrivateUsage]
+
+    older = await service.screen_upload(
+        jd_id=seeded_jd_analysis_id,
+        file_name="older.pdf",
+        mime_type="application/pdf",
+        file_bytes=b"%PDF-1.7\nolder",
+    )
+    newer = await service.screen_upload(
+        jd_id=seeded_jd_analysis_id,
+        file_name="newer.pdf",
+        mime_type="application/pdf",
+        file_bytes=b"%PDF-1.7\nnewer",
+    )
+
+    items = await service.list_screenings_for_jd(seeded_jd_analysis_id)
+
+    assert [item.screening_id for item in items] == [newer.screening_id, older.screening_id]
+    assert items[0].file_name == "newer.pdf"
+    assert items[0].recommendation == newer.result.recommendation
+    assert items[0].match_score == newer.result.match_score
+
+
+@pytest.mark.asyncio
+async def test_list_screenings_for_jd_supports_legacy_screening_payload(
+    db_session: AsyncSession,
+    seeded_jd_analysis_id: str,
+) -> None:
+    """Return history items even when older screenings use the legacy payload shape."""
+    candidate_document = CandidateDocument(
+        file_name="legacy.pdf",
+        mime_type="application/pdf",
+        storage_path="/tmp/legacy.pdf",
+        status="completed",
+    )
+    db_session.add(candidate_document)
+    await db_session.flush()
+
+    candidate_profile = CandidateProfile(
+        candidate_document_id=candidate_document.id,
+        profile_payload=sample_candidate_profile_payload().model_dump(mode="json"),
+    )
+    db_session.add(candidate_profile)
+    await db_session.flush()
+
+    legacy_screening = CandidateScreening(
+        jd_document_id=seeded_jd_analysis_id,
+        candidate_profile_id=candidate_profile.id,
+        model_name="gemini-2.5-pro",
+        screening_payload={
+            "match_score": 0.61,
+            "recommendation": "review",
+            "decision_reason": {
+                "vi": "Payload cũ vẫn còn trong DB",
+                "en": "Legacy payload still exists in the database",
+            },
+            "gaps": [],
+        },
+    )
+    db_session.add(legacy_screening)
+    await db_session.commit()
+
+    service = CVScreeningService(db_session=db_session)
+    items = await service.list_screenings_for_jd(seeded_jd_analysis_id)
+
+    assert any(item.screening_id == legacy_screening.id for item in items)
+    legacy_item = next(item for item in items if item.screening_id == legacy_screening.id)
+    assert legacy_item.recommendation == "review"
+    assert legacy_item.match_score == 0.61
+    assert legacy_item.file_name == "legacy.pdf"
 
 
 @pytest.mark.asyncio

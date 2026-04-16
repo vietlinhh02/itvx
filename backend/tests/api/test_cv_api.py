@@ -12,7 +12,7 @@ from pytest import MonkeyPatch
 
 from src.database import get_db
 from src.main import app
-from src.schemas.cv import CVScreeningResponse
+from src.schemas.cv import CVScreeningHistoryResponse, CVScreeningResponse
 
 
 class FakeCVScreeningService:
@@ -109,6 +109,20 @@ class FakeCVScreeningService:
             mime_type="application/pdf",
             file_bytes=b"%PDF-1.7\ncandidate",
         )
+
+    async def list_screenings_for_jd(self, jd_id: str) -> list[dict[str, object]]:
+        """Return lightweight screening history for one JD."""
+        return [
+            {
+                "screening_id": "test-screening-id",
+                "jd_id": jd_id,
+                "candidate_id": "candidate-id",
+                "file_name": "candidate.pdf",
+                "created_at": "2026-04-16T00:00:00Z",
+                "recommendation": "review",
+                "match_score": 0.72,
+            }
+        ]
 
 
 def build_client(monkeypatch: MonkeyPatch) -> TestClient:
@@ -258,3 +272,16 @@ def test_cv_screening_detail_returns_not_found(monkeypatch: MonkeyPatch) -> None
 
     assert response.status_code == 404
     assert response.json() == {"detail": "CV screening not found"}
+
+
+def test_cv_screening_history_returns_items(monkeypatch: MonkeyPatch) -> None:
+    """Return lightweight screening history for one JD."""
+    stub_cv_service(monkeypatch)
+    client = build_client(monkeypatch)
+
+    response = client.get("/api/v1/cv/jd/test-jd-id/screenings")
+
+    assert response.status_code == 200
+    payload = CVScreeningHistoryResponse.model_validate(response.json())
+    assert payload.items[0].screening_id == "test-screening-id"
+    assert payload.items[0].jd_id == "test-jd-id"
