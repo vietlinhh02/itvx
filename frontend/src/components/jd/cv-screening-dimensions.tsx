@@ -1,4 +1,4 @@
-import type { CVScreeningResponse } from "@/components/jd/cv-screening-types"
+import type { ScreeningResult } from "@/components/jd/cv-screening-types"
 import {
   BilingualBlock,
   EmptyValue,
@@ -10,12 +10,12 @@ import {
 export function CVScreeningDimensions({
   dimensions,
 }: {
-  dimensions: CVScreeningResponse["result"]["dimension_scores"]
+  dimensions: ScreeningResult["dimension_scores"]
 }) {
   return (
     <ReviewSection
-      title="Rubric Dimension Scores"
-      description="Weighted dimension-by-dimension assessment from the backend screening engine."
+      title="Điểm theo từng năng lực"
+      description="Đánh giá theo từng năng lực có trọng số từ engine sàng lọc của backend."
     >
       <div className="space-y-4">
         {dimensions.length ? (
@@ -26,21 +26,21 @@ export function CVScreeningDimensions({
                 <PriorityBadge priority={dimension.priority} />
               </div>
               <div className="mt-3 grid gap-3 md:grid-cols-2 xl:grid-cols-3">
-                <Metric label="Weight" value={String(dimension.weight)} />
-                <Metric label="Score" value={`${Math.round(dimension.score * 100)}%`} />
-                <Metric label="Priority" value={dimension.priority.replaceAll("_", " ")} />
+                <Metric label="Trọng số" value={String(dimension.weight)} />
+                <Metric label="Điểm" value={`${Math.round(dimension.score * 100)}%`} />
+                <Metric label="Mức ưu tiên" value={dimension.priority.replaceAll("_", " ")} />
               </div>
               <div className="mt-4">
-                <p className="text-sm text-[var(--color-brand-text-body)]">{dimension.reason.en}</p>
-                <p className="mt-1 text-sm text-[var(--color-brand-text-muted)]">{dimension.reason.vi}</p>
+                <p className="text-sm text-[var(--color-brand-text-body)]">{dimension.reason.vi}</p>
+                <p className="mt-1 text-sm text-[var(--color-brand-text-muted)]">{dimension.reason.en}</p>
               </div>
               {dimension.confidence_note ? (
                 <div className="mt-4 rounded-[14px] bg-[var(--color-primary-50)] px-3 py-2">
                   <p className="text-sm font-medium text-[var(--color-brand-text-primary)]">
-                    {dimension.confidence_note.en}
+                    {dimension.confidence_note.vi}
                   </p>
                   <p className="mt-1 text-sm text-[var(--color-brand-text-muted)]">
-                    {dimension.confidence_note.vi}
+                    {dimension.confidence_note.en}
                   </p>
                 </div>
               ) : null}
@@ -48,7 +48,7 @@ export function CVScreeningDimensions({
             </article>
           ))
         ) : (
-          <EmptyValue text="No dimension scores" />
+          <EmptyValue text="Không có điểm theo năng lực" />
         )}
       </div>
     </ReviewSection>
@@ -58,7 +58,7 @@ export function CVScreeningDimensions({
 function Metric({ label, value }: { label: string; value: string }) {
   return (
     <div className="rounded-[14px] bg-[var(--color-primary-50)] px-3 py-2">
-      <p className="text-xs uppercase tracking-[0.18em] text-[var(--color-brand-text-muted)]">{label}</p>
+      <p className="text-xs text-[var(--color-brand-text-muted)]">{label}</p>
       <p className="mt-2 text-sm font-medium capitalize text-[var(--color-brand-text-primary)]">{value}</p>
     </div>
   )
