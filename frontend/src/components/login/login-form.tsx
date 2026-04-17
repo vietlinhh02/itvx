@@ -12,7 +12,7 @@ export function LoginForm() {
       <div className="flex items-center gap-3">
         <div className="h-px flex-1 bg-[var(--color-brand-input-border)]" />
         <p className="text-sm font-medium text-[var(--color-brand-text-muted)]">
-          Sign in with your Gmail
+          Đăng nhập bằng tài khoản Gmail
         </p>
         <div className="h-px flex-1 bg-[var(--color-brand-input-border)]" />
       </div>
@@ -24,13 +24,13 @@ export function LoginForm() {
         type="button"
       >
         <GoogleMark />
-        <span>{isLoading ? "Redirecting..." : "Continue with Google"}</span>
+        <span>{isLoading ? "Đang chuyển hướng..." : "Tiếp tục với Google"}</span>
       </button>
 
       {error ? <p className="text-center text-sm font-medium text-red-600">{error}</p> : null}
 
       <p className="text-center text-base text-[var(--color-brand-text-body)]">
-        Only authorized HR and Admin accounts can access InterviewX.
+        Chỉ các tài khoản HR và Admin được cấp quyền mới có thể truy cập InterviewX.
       </p>
     </div>
   )
