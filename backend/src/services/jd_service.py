@@ -1,6 +1,5 @@
 """Orchestration service for JD upload and analysis."""
 
-from datetime import UTC, datetime
 from pathlib import Path
 from typing import Protocol
 from uuid import uuid4
@@ -9,8 +8,15 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from src.config import settings
+from src.models.background_job import BackgroundJob
 from src.models.jd import JDAnalysis, JDDocument
-from src.schemas.jd import JDAnalysisPayload, JDAnalysisResponse, JDRecentItem
+from src.schemas.jd import (
+    JDAnalysisEnqueueResponse,
+    JDAnalysisPayload,
+    JDAnalysisResponse,
+    JDRecentItem,
+)
+from src.services.datetime_utils import to_vietnam_isoformat, vietnam_now_isoformat
 from src.services.file_storage import store_upload_file
 from src.services.jd_extractor import GeminiJDExtractor
 
@@ -76,10 +82,10 @@ class JDAnalysisService:
             await self._db_session.commit()
             await self._db_session.refresh(document)
             jd_id = document.id
-            created_at = document.created_at.replace(tzinfo=UTC).isoformat()
+            created_at = to_vietnam_isoformat(document.created_at)
         else:
             jd_id = str(uuid4())
-            created_at = datetime.now(UTC).isoformat()
+            created_at = vietnam_now_isoformat()
 
         return JDAnalysisResponse(
             jd_id=jd_id,
@@ -88,6 +94,75 @@ class JDAnalysisService:
             created_at=created_at,
             analysis=analysis,
         )
+
+    async def enqueue_analysis_upload(
+        self,
+        file_name: str,
+        mime_type: str,
+        file_bytes: bytes,
+    ) -> JDAnalysisEnqueueResponse:
+        """Store the upload, persist a processing JD document, and enqueue work."""
+        if self._db_session is None:
+            raise RuntimeError("JDAnalysisService requires a database session")
+
+        stored_file = store_upload_file(
+            upload_dir=self._upload_dir,
+            file_name=file_name,
+            file_bytes=file_bytes,
+        )
+        document = JDDocument(
+            file_name=stored_file.file_name,
+            mime_type=mime_type,
+            storage_path=stored_file.storage_path,
+            status="processing",
+        )
+        self._db_session.add(document)
+        await self._db_session.flush()
+
+        job = BackgroundJob(
+            job_type="jd_analysis",
+            status="queued",
+            resource_type="jd_document",
+            resource_id=document.id,
+            payload={
+                "jd_id": document.id,
+                "file_name": stored_file.file_name,
+                "mime_type": mime_type,
+                "storage_path": stored_file.storage_path,
+            },
+        )
+        self._db_session.add(job)
+        await self._db_session.commit()
+        await self._db_session.refresh(job)
+
+        return JDAnalysisEnqueueResponse(
+            job_id=job.id,
+            jd_id=document.id,
+            file_name=stored_file.file_name,
+            status="processing",
+        )
+
+    async def run_analysis_job(self, jd_id: str) -> None:
+        """Execute queued JD analysis work for one persisted document."""
+        if self._db_session is None:
+            raise RuntimeError("JDAnalysisService requires a database session")
+
+        document = await self._db_session.scalar(
+            select(JDDocument).where(JDDocument.id == jd_id)
+        )
+        if document is None:
+            raise ValueError("JD document not found")
+
+        analysis = await self._extractor.extract(Path(document.storage_path), document.mime_type)
+        self._db_session.add(
+            JDAnalysis(
+                jd_document_id=document.id,
+                model_name=settings.gemini_model,
+                analysis_payload=analysis.model_dump(mode="json"),
+            )
+        )
+        document.status = "completed"
+        await self._db_session.commit()
 
     async def get_analysis(self, jd_id: str) -> JDAnalysisResponse | None:
         """Return a persisted JD analysis by id when available."""
@@ -104,7 +179,7 @@ class JDAnalysisService:
             return None
 
         document, analysis_record = row
-        created_at = document.created_at.replace(tzinfo=UTC).isoformat()
+        created_at = to_vietnam_isoformat(document.created_at)
         analysis = JDAnalysisPayload.model_validate(analysis_record.analysis_payload)
         return JDAnalysisResponse(
             jd_id=document.id,
@@ -135,7 +210,7 @@ class JDAnalysisService:
                     jd_id=document.id,
                     file_name=document.file_name,
                     status=document.status,
-                    created_at=document.created_at.replace(tzinfo=UTC).isoformat(),
+                    created_at=to_vietnam_isoformat(document.created_at),
                     job_title=analysis_payload.job_overview.job_title.en,
                 )
             )

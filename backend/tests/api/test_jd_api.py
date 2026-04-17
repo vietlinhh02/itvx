@@ -12,7 +12,14 @@ from pytest import MonkeyPatch
 
 from src.database import get_db
 from src.main import app
-from src.schemas.jd import JDAnalysisPayload, JDAnalysisResponse
+from src.schemas.jd import (
+    JDAnalysisEnqueueResponse,
+    JDAnalysisPayload,
+    JDAnalysisResponse,
+    JDCompanyDocumentListResponse,
+    JDCompanyDocumentUploadResponse,
+    JDCompanyKnowledgeQueryResponse,
+)
 
 
 class FakeJDAnalysisService:
@@ -120,6 +127,25 @@ class FakeJDAnalysisService:
             ),
         )
 
+    async def enqueue_analysis_upload(
+        self,
+        file_name: str,
+        mime_type: str,
+        file_bytes: bytes,
+    ) -> JDAnalysisEnqueueResponse:
+        """Record the upload call and return an async enqueue response."""
+        type(self).captured_call = {
+            "file_name": file_name,
+            "mime_type": mime_type,
+            "file_bytes": file_bytes,
+        }
+        return JDAnalysisEnqueueResponse(
+            job_id="test-job-id",
+            jd_id="test-jd-id",
+            file_name=file_name,
+            status="processing",
+        )
+
     async def get_analysis(self, jd_id: str) -> JDAnalysisResponse | None:
         """Return a stored JD analysis when the requested id matches the fixture."""
         if jd_id != "test-jd-id":
@@ -154,6 +180,74 @@ class FakeJDAnalysisService:
         ]
 
 
+class FakeCompanyKnowledgeService:
+    captured_upload: ClassVar[dict[str, str | bytes] | None] = None
+
+    def __init__(self, **kwargs: object) -> None:
+        _ = kwargs
+
+    async def upload_document(
+        self,
+        *,
+        jd_id: str,
+        file_name: str,
+        mime_type: str,
+        file_bytes: bytes,
+    ):
+        type(self).captured_upload = {
+            "jd_id": jd_id,
+            "file_name": file_name,
+            "mime_type": mime_type,
+            "file_bytes": file_bytes,
+        }
+        return JDCompanyDocumentUploadResponse(
+            job_id="job-company-1",
+            document={
+                "document_id": "doc-1",
+                "jd_id": jd_id,
+                "file_name": file_name,
+                "status": "queued",
+                "chunk_count": 0,
+                "error_message": None,
+                "created_at": "2026-04-17T00:00:00Z",
+            },
+        )
+
+    async def list_documents(self, jd_id: str):
+        return JDCompanyDocumentListResponse(
+            items=[
+                {
+                    "document_id": "doc-1",
+                    "jd_id": jd_id,
+                    "file_name": "company-handbook.pdf",
+                    "status": "ready",
+                    "chunk_count": 3,
+                    "error_message": None,
+                    "created_at": "2026-04-17T00:00:00Z",
+                }
+            ]
+        ).items
+
+    async def delete_document(self, jd_id: str, document_id: str) -> bool:
+        _ = (jd_id, document_id)
+        return True
+
+    async def query_knowledge(self, jd_id: str, query: str):
+        return JDCompanyKnowledgeQueryResponse(
+            query=query,
+            citations=[
+                {
+                    "chunk_id": "chunk-1",
+                    "document_id": "doc-1",
+                    "file_name": "company-handbook.pdf",
+                    "section_title": "Benefits",
+                    "page_number": None,
+                    "excerpt": "Annual leave is 15 days.",
+                }
+            ],
+        )
+
+
 def build_client(monkeypatch: MonkeyPatch) -> TestClient:
     """Create a test client without running real startup work."""
 
@@ -176,6 +270,7 @@ def stub_jd_service(monkeypatch: MonkeyPatch) -> None:
     except ModuleNotFoundError:
         return
     monkeypatch.setattr(jd_api, "JDAnalysisService", FakeJDAnalysisService)
+    monkeypatch.setattr(jd_api, "CompanyKnowledgeService", FakeCompanyKnowledgeService)
 
 
 def build_docx_bytes() -> bytes:
@@ -197,8 +292,25 @@ def test_jd_analyze_endpoint_accepts_pdf_upload(monkeypatch: MonkeyPatch) -> Non
         files={"file": ("jd.pdf", b"%PDF-1.7\npdf-content", "application/pdf")},
     )
 
-    assert response.status_code == 200
+    assert response.status_code == 202
     assert response.json()["file_name"] == "jd.pdf"
+
+
+def test_jd_analyze_returns_processing_enqueue_response(monkeypatch: MonkeyPatch) -> None:
+    """JD analyze should return a processing response with both ids."""
+    stub_jd_service(monkeypatch)
+    client = build_client(monkeypatch)
+
+    response = client.post(
+        "/api/v1/jd/analyze",
+        files={"file": ("jd.pdf", b"%PDF-1.7\njd", "application/pdf")},
+    )
+
+    assert response.status_code == 202
+    payload = response.json()
+    assert payload["status"] == "processing"
+    assert "job_id" in payload
+    assert "jd_id" in payload
 
 
 def test_jd_analyze_endpoint_passes_db_session(monkeypatch: MonkeyPatch) -> None:
@@ -211,7 +323,7 @@ def test_jd_analyze_endpoint_passes_db_session(monkeypatch: MonkeyPatch) -> None
         files={"file": ("jd.pdf", b"%PDF-1.7\npdf-content", "application/pdf")},
     )
 
-    assert response.status_code == 200
+    assert response.status_code == 202
     assert FakeJDAnalysisService.captured_init is not None
     assert "db_session" in FakeJDAnalysisService.captured_init
     assert FakeJDAnalysisService.captured_init["db_session"] is not None
@@ -275,6 +387,20 @@ def test_jd_analyze_endpoint_rejects_invalid_docx_content(monkeypatch: MonkeyPat
     assert response.json() == {"detail": "File content does not match content type"}
 
 
+def test_jd_analyze_endpoint_accepts_pdf_with_leading_newline(monkeypatch: MonkeyPatch) -> None:
+    """Endpoint should accept PDF uploads whose file header appears after leading whitespace."""
+    stub_jd_service(monkeypatch)
+    client = build_client(monkeypatch)
+
+    response = client.post(
+        "/api/v1/jd/analyze",
+        files={"file": ("jd.pdf", b"\n%PDF-1.7\njob-description", "application/pdf")},
+    )
+
+    assert response.status_code == 202
+    assert response.json()["file_name"] == "jd.pdf"
+
+
 def test_jd_analyze_endpoint_accepts_valid_docx_upload(monkeypatch: MonkeyPatch) -> None:
     """Endpoint should accept DOCX uploads with valid zip-based structure."""
     stub_jd_service(monkeypatch)
@@ -291,7 +417,7 @@ def test_jd_analyze_endpoint_accepts_valid_docx_upload(monkeypatch: MonkeyPatch)
         },
     )
 
-    assert response.status_code == 200
+    assert response.status_code == 202
     assert response.json()["file_name"] == "jd.docx"
 
 
@@ -341,3 +467,39 @@ def test_recent_jd_endpoint_returns_recent_uploads(monkeypatch: MonkeyPatch) -> 
     assert response.status_code == 200
     assert response.json()[0]["jd_id"] == "test-jd-id"
     assert response.json()[1]["job_title"] == "ML Engineer Intern"
+
+
+def test_company_document_upload_endpoint_accepts_pdf(monkeypatch: MonkeyPatch) -> None:
+    stub_jd_service(monkeypatch)
+    client = build_client(monkeypatch)
+
+    response = client.post(
+        "/api/v1/jd/test-jd-id/company-documents",
+        files={"file": ("company.pdf", b"%PDF-1.7\ncompany", "application/pdf")},
+    )
+
+    assert response.status_code == 202
+    assert response.json()["document"]["file_name"] == "company.pdf"
+
+
+def test_company_document_list_endpoint_returns_items(monkeypatch: MonkeyPatch) -> None:
+    stub_jd_service(monkeypatch)
+    client = build_client(monkeypatch)
+
+    response = client.get("/api/v1/jd/test-jd-id/company-documents")
+
+    assert response.status_code == 200
+    assert response.json()["items"][0]["status"] == "ready"
+
+
+def test_company_knowledge_query_endpoint_returns_citations(monkeypatch: MonkeyPatch) -> None:
+    stub_jd_service(monkeypatch)
+    client = build_client(monkeypatch)
+
+    response = client.post(
+        "/api/v1/jd/test-jd-id/company-knowledge/query",
+        json={"query": "benefits"},
+    )
+
+    assert response.status_code == 200
+    assert response.json()["citations"][0]["section_title"] == "Benefits"

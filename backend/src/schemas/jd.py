@@ -95,6 +95,15 @@ class JDAnalysisPayload(BaseModel):
     rubric_seed: RubricSeed
 
 
+class JDAnalysisEnqueueResponse(BaseModel):
+    """API response for an enqueued JD analysis job."""
+
+    job_id: str
+    jd_id: str
+    file_name: str
+    status: Literal["processing"]
+
+
 class JDAnalysisResponse(BaseModel):
     """API response for a completed JD analysis."""
 
@@ -115,13 +124,69 @@ class JDRecentItem(BaseModel):
     job_title: str | None = None
 
 
+class JDCompanyDocumentItem(BaseModel):
+    """Persisted company knowledge document metadata for one JD."""
+
+    document_id: str
+    jd_id: str
+    file_name: str
+    status: str
+    chunk_count: int = Field(ge=0)
+    error_message: str | None = None
+    created_at: str
+
+
+class JDCompanyDocumentListResponse(BaseModel):
+    """Company knowledge document list for one JD."""
+
+    items: list[JDCompanyDocumentItem]
+
+
+class JDCompanyDocumentUploadResponse(BaseModel):
+    """Response for an enqueued company document upload."""
+
+    job_id: str
+    document: JDCompanyDocumentItem
+
+
+class JDCompanyKnowledgeCitation(BaseModel):
+    """Citation metadata for one retrieved knowledge chunk."""
+
+    chunk_id: str
+    document_id: str
+    file_name: str
+    section_title: str | None = None
+    page_number: int | None = None
+    excerpt: str
+
+
+class JDCompanyKnowledgeQueryRequest(BaseModel):
+    """Question used to query JD-scoped company knowledge."""
+
+    query: str = Field(min_length=1)
+
+
+class JDCompanyKnowledgeQueryResponse(BaseModel):
+    """Retrieved citations for a company knowledge question."""
+
+    query: str
+    citations: list[JDCompanyKnowledgeCitation]
+
+
 __all__ = [
     "BilingualText",
     "EvaluationDimension",
     "ExperienceRequirements",
     "HumanReadableText",
+    "JDAnalysisEnqueueResponse",
     "JDAnalysisPayload",
     "JDAnalysisResponse",
+    "JDCompanyDocumentItem",
+    "JDCompanyDocumentListResponse",
+    "JDCompanyDocumentUploadResponse",
+    "JDCompanyKnowledgeCitation",
+    "JDCompanyKnowledgeQueryRequest",
+    "JDCompanyKnowledgeQueryResponse",
     "JDRecentItem",
     "JobOverview",
     "Requirements",
