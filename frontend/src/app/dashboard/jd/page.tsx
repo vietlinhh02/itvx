@@ -1,10 +1,11 @@
 import { getServerSession } from "next-auth"
 import type { Route } from "next"
-import Link from "next/link"
 import { redirect } from "next/navigation"
 
 import { JDUploadPanel } from "@/components/jd/jd-upload-panel"
+import { AppLink } from "@/components/navigation/app-link"
 import { authOptions } from "@/lib/auth-options"
+import { formatVietnamDateTime } from "@/lib/datetime"
 
 const backendBaseUrl = process.env.API_URL ?? process.env.NEXT_PUBLIC_API_URL
 
@@ -44,20 +45,20 @@ export default async function JDDashboardPage() {
 
         <section className="rounded-[24px] bg-white p-6 shadow-[0px_10px_30px_0px_rgba(15,79,87,0.06)] xl:max-h-[calc(100vh-14rem)] xl:overflow-y-auto xl:scrollbar-hidden">
           <div>
-            <p className="text-sm font-medium text-[var(--color-brand-text-muted)]">Navigation</p>
+            <p className="text-sm font-medium text-[var(--color-brand-text-muted)]">Điều hướng</p>
             <h2 className="mt-2 text-2xl font-semibold text-[var(--color-brand-text-primary)]">
-              Recent JD uploads
+              Các JD tải lên gần đây
             </h2>
             <p className="mt-2 text-sm leading-6 text-[var(--color-brand-text-body)]">
-              Open any recent JD analysis directly from its persisted id.
+              Mở nhanh bất kỳ bản phân tích JD gần đây nào từ mã đã được lưu.
             </p>
           </div>
 
           <div className="mt-5 flex flex-col gap-3">
             {recentUploads.length ? (
               recentUploads.map((item) => (
-                <Link
-                  className="rounded-[18px] border border-[var(--color-brand-input-border)] p-4 transition hover:border-[var(--color-brand-primary)] hover:bg-[var(--color-primary-50)]"
+                <AppLink
+                  className="rounded-[18px] border border-[var(--color-brand-input-border)] p-4 transition duration-200 hover:-translate-y-0.5 hover:border-[var(--color-brand-primary)] hover:bg-[var(--color-primary-50)]"
                   href={buildJDRoute(item.jd_id)}
                   key={item.jd_id}
                 >
@@ -68,18 +69,18 @@ export default async function JDDashboardPage() {
                       </p>
                       <p className="mt-1 text-sm text-[var(--color-brand-text-muted)]">{item.file_name}</p>
                     </div>
-                    <span className="rounded-full bg-[var(--color-primary-50)] px-3 py-1 text-xs font-semibold uppercase tracking-[0.18em] text-[var(--color-brand-primary)]">
+                    <span className="rounded-full bg-[var(--color-primary-50)] px-3 py-1 text-xs font-semibold text-[var(--color-brand-primary)]">
                       {item.status}
                     </span>
                   </div>
-                  <p className="mt-3 text-xs uppercase tracking-[0.18em] text-[var(--color-brand-text-muted)]">
-                    {new Date(item.created_at).toLocaleString()}
+                  <p className="mt-3 text-xs text-[var(--color-brand-text-muted)]">
+                    {formatVietnamDateTime(item.created_at)}
                   </p>
-                </Link>
+                </AppLink>
               ))
             ) : (
               <p className="rounded-[18px] border border-dashed border-[var(--color-brand-input-border)] p-4 text-sm text-[var(--color-brand-text-muted)]">
-                No JD uploads yet. Upload your first document to populate this list.
+                Chưa có JD nào được tải lên. Hãy tải tài liệu đầu tiên để tạo danh sách này.
               </p>
             )}
           </div>
