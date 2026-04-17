@@ -1,5 +1,8 @@
 import type { Metadata } from "next"
 import localFont from "next/font/local"
+
+import { NavigationLoadingProvider } from "@/components/navigation/navigation-loading-provider"
+
 import "./globals.css"
 
 const googleSans = localFont({
@@ -40,7 +43,9 @@ export default function RootLayout({
 }>) {
   return (
     <html lang="vi">
-      <body className={`${googleSans.variable} antialiased`}>{children}</body>
+      <body className={`${googleSans.variable} antialiased`}>
+        <NavigationLoadingProvider>{children}</NavigationLoadingProvider>
+      </body>
     </html>
   )
 }
