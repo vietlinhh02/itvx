@@ -9,7 +9,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from src.config import settings
 from src.database import get_db
-from src.schemas.cv import CVScreeningHistoryResponse, CVScreeningResponse
+from src.schemas.cv import CVScreeningEnqueueResponse, CVScreeningHistoryResponse, CVScreeningResponse
 from src.services.cv_screening_service import CVScreeningService, JDNotReadyError
 
 router = APIRouter(prefix="/cv", tags=["cv"])
@@ -21,8 +21,8 @@ SUPPORTED_MIME_TYPES = {
 
 
 def _matches_pdf_signature(file_bytes: bytes) -> bool:
-    """Return whether the upload starts with a PDF file header."""
-    return file_bytes.startswith(b"%PDF-")
+    """Return whether the upload contains a PDF file header after leading whitespace."""
+    return file_bytes.lstrip().startswith(b"%PDF-")
 
 
 def _matches_docx_structure(file_bytes: bytes) -> bool:
@@ -43,12 +43,12 @@ def _validate_file_content(mime_type: str, file_bytes: bytes) -> bool:
     return _matches_docx_structure(file_bytes)
 
 
-@router.post("/screen", response_model=CVScreeningResponse)
+@router.post("/screen", response_model=CVScreeningEnqueueResponse, status_code=202)
 async def screen_cv(
     jd_id: Annotated[str, Form(...)],
     file: Annotated[UploadFile, File(...)],
     db: Annotated[AsyncSession, Depends(get_db)],
-) -> CVScreeningResponse:
+) -> CVScreeningEnqueueResponse:
     """Upload one CV and return the Phase 2 screening response."""
     if file.content_type not in SUPPORTED_MIME_TYPES:
         raise HTTPException(status_code=400, detail="Unsupported file type")
@@ -63,7 +63,7 @@ async def screen_cv(
 
     service = CVScreeningService(upload_dir=settings.cv_upload_path, db_session=db)
     try:
-        return await service.screen_upload(
+        return await service.enqueue_screening_upload(
             jd_id=jd_id,
             file_name=file.filename or "uploaded-cv",
             mime_type=file.content_type,
@@ -71,6 +71,16 @@ async def screen_cv(
         )
     except JDNotReadyError as exc:
         raise HTTPException(status_code=404, detail=str(exc)) from exc
+
+
+@router.get("/screenings", response_model=CVScreeningHistoryResponse)
+async def list_all_cv_screenings(
+    db: Annotated[AsyncSession, Depends(get_db)],
+) -> CVScreeningHistoryResponse:
+    """Return all stored CV screenings across every JD."""
+    service = CVScreeningService(upload_dir=settings.cv_upload_path, db_session=db)
+    items = await service.list_all_screenings()
+    return CVScreeningHistoryResponse(items=items)
 
 
 @router.get("/jd/{jd_id}/screenings", response_model=CVScreeningHistoryResponse)
