@@ -1,11 +1,12 @@
 import type { Route } from "next"
-import Link from "next/link"
 
 import { LoginLogo } from "@/components/login/login-logo"
+import { AppLink } from "@/components/navigation/app-link"
 
 const NAV_ITEMS: { label: string; href: Route }[] = [
-  { label: "Overview", href: "/dashboard" as Route },
-  { label: "JD workspace", href: "/dashboard/jd" as Route },
+  { label: "Tổng quan", href: "/dashboard" as Route },
+  { label: "Phân tích JD", href: "/dashboard/jd" as Route },
+  { label: "Sàng lọc CV", href: "/dashboard/cv-screenings" as Route },
 ]
 
 export function DashboardHeader() {
@@ -16,13 +17,13 @@ export function DashboardHeader() {
       </div>
       <nav className="ml-auto flex items-center gap-3">
         {NAV_ITEMS.map((item) => (
-          <Link
+          <AppLink
             key={item.href}
             className="rounded-full border border-[var(--color-brand-input-border)] bg-white px-3 py-1.5 text-xs font-medium text-[var(--color-brand-primary)]"
             href={item.href}
           >
             {item.label}
-          </Link>
+          </AppLink>
         ))}
       </nav>
     </header>
