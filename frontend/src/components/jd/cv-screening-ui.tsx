@@ -31,13 +31,14 @@ export function ReviewSection({
 export function BilingualBlock({ value }: { value: BilingualText }) {
   return (
     <div>
-      <p className="text-sm font-medium text-[var(--color-brand-text-primary)]">{value.en}</p>
-      <p className="mt-1 text-sm text-[var(--color-brand-text-muted)]">{value.vi}</p>
+      <p className="text-sm font-medium text-[var(--color-brand-text-primary)]">{value.vi}</p>
+      <p className="mt-1 text-sm text-[var(--color-brand-text-muted)]">{value.en}</p>
     </div>
   )
 }
 
 export function StatusBadge({ status }: { status: RequirementStatus }) {
+  const label = status === "met" ? "Đạt" : status === "not_met" ? "Không đạt" : "Chưa rõ"
   const className =
     status === "met"
       ? "bg-emerald-50 text-emerald-700"
@@ -46,8 +47,8 @@ export function StatusBadge({ status }: { status: RequirementStatus }) {
         : "bg-amber-50 text-amber-700"
 
   return (
-    <span className={`rounded-full px-3 py-1 text-xs font-semibold uppercase tracking-[0.18em] ${className}`}>
-      {status.replace("_", " ")}
+    <span className={`rounded-full px-3 py-1 text-xs font-semibold ${className}`}>
+      {label}
     </span>
   )
 }
@@ -55,15 +56,15 @@ export function StatusBadge({ status }: { status: RequirementStatus }) {
 export function PriorityBadge({ priority }: { priority: string }) {
   const config =
     priority === "must_have"
-      ? { label: "Must have", icon: ShieldWarning, className: "bg-rose-50 text-rose-700" }
+      ? { label: "Bắt buộc", icon: ShieldWarning, className: "bg-rose-50 text-rose-700" }
       : priority === "important"
-        ? { label: "Important", icon: Target, className: "bg-sky-50 text-sky-700" }
-        : { label: "Nice to have", icon: Sparkle, className: "bg-violet-50 text-violet-700" }
+        ? { label: "Quan trọng", icon: Target, className: "bg-sky-50 text-sky-700" }
+        : { label: "Nên có", icon: Sparkle, className: "bg-violet-50 text-violet-700" }
 
   const Icon = config.icon
 
   return (
-    <span className={`rounded-full px-3 py-1 text-xs font-semibold uppercase tracking-[0.18em] ${config.className}`}>
+    <span className={`rounded-full px-3 py-1 text-xs font-semibold ${config.className}`}>
       <span className="flex items-center gap-1.5">
         <Icon size={12} weight="fill" />
         {config.label}
@@ -73,6 +74,7 @@ export function PriorityBadge({ priority }: { priority: string }) {
 }
 
 export function RiskBadge({ severity }: { severity: RiskSeverity }) {
+  const label = severity === "high" ? "Cao" : severity === "medium" ? "Trung bình" : "Thấp"
   const className =
     severity === "high"
       ? "bg-rose-50 text-rose-700"
@@ -81,15 +83,15 @@ export function RiskBadge({ severity }: { severity: RiskSeverity }) {
         : "bg-slate-100 text-slate-700"
 
   return (
-    <span className={`rounded-full px-3 py-1 text-xs font-semibold uppercase tracking-[0.18em] ${className}`}>
-      {severity}
+    <span className={`rounded-full px-3 py-1 text-xs font-semibold ${className}`}>
+      {label}
     </span>
   )
 }
 
 export function EvidenceList({ items }: { items: BilingualText[] }) {
   if (!items.length) {
-    return <p className="text-sm text-[var(--color-brand-text-muted)]">No evidence</p>
+    return <p className="text-sm text-[var(--color-brand-text-muted)]">Không có bằng chứng</p>
   }
 
   return (
@@ -103,6 +105,6 @@ export function EvidenceList({ items }: { items: BilingualText[] }) {
   )
 }
 
-export function EmptyValue({ text = "None" }: { text?: string }) {
+export function EmptyValue({ text = "Không có" }: { text?: string }) {
   return <p className="text-sm text-[var(--color-brand-text-muted)]">{text}</p>
 }
