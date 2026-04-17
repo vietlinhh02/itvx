@@ -8,7 +8,7 @@ from pydantic import ValidationError
 from sqlalchemy import JSON
 
 from src.config import Settings
-from src.models import CandidateDocument, CandidateProfile, CandidateScreening
+from src.models import BackgroundJob, CandidateDocument, CandidateProfile, CandidateScreening
 from src.schemas.cv import (
     AuditMetadata,
     CandidateProfilePayload,
@@ -54,6 +54,40 @@ def test_candidate_screening_foreign_keys_target_task_1_tables() -> None:
     assert {cast(str, fk.target_fullname) for fk in candidate_profile_column.foreign_keys} == {
         "candidate_profiles.id"
     }
+
+
+def test_background_job_and_screening_status_columns_exist() -> None:
+    """Ensure async job persistence fields exist for background processing."""
+    status_column = CandidateScreening.__table__.c.status
+    assert not cast(bool, status_column.nullable)
+    assert status_column.default is not None
+
+    job_columns = BackgroundJob.__table__.c
+    assert "job_type" in job_columns
+    assert "resource_type" in job_columns
+    assert "payload" in job_columns
+    assert "error_message" in job_columns
+
+
+def test_migration_script_contains_background_job_schema_updates() -> None:
+    """Keep the hand-written local migration aligned with new background job fields."""
+    migration_path = Path("src/scripts/migrate_background_jobs.py")
+    migration_text = migration_path.read_text()
+
+    assert "ALTER TABLE candidate_screenings" in migration_text
+    assert "ADD COLUMN IF NOT EXISTS status VARCHAR(50)" in migration_text
+    assert "CREATE TABLE IF NOT EXISTS background_jobs" in migration_text
+    assert "job_type VARCHAR(50) NOT NULL" in migration_text
+
+
+def test_dev_script_starts_api_and_worker() -> None:
+    """Keep the local dev shell script aligned with the API and worker commands."""
+    script_path = Path("src/scripts/dev_api_and_worker.sh")
+    script_text = script_path.read_text()
+
+    assert "set -euo pipefail" in script_text
+    assert "uv run uvicorn src.main:app --host 0.0.0.0 --port 8000" in script_text
+    assert "uv run python -m src.scripts.run_background_jobs" in script_text
 
 
 def test_cv_model_relationship_names_match_task_1_contract() -> None:
@@ -122,8 +156,8 @@ def test_audit_metadata_requires_schema_versions() -> None:
         )
 
 
-def test_cv_screening_response_requires_candidate_profile_result_and_audit() -> None:
-    """Reject screening responses missing Phase 2 top-level sections."""
+def test_cv_screening_response_requires_candidate_profile_result_and_audit_when_completed() -> None:
+    """Reject completed screening responses missing Phase 2 top-level sections."""
     with pytest.raises(ValidationError):
         _ = CVScreeningResponse.model_validate(
             {
@@ -135,6 +169,23 @@ def test_cv_screening_response_requires_candidate_profile_result_and_audit() -> 
                 "created_at": "2026-04-16T00:00:00Z",
             }
         )
+
+
+def test_cv_screening_response_allows_processing_without_completed_sections() -> None:
+    """Allow processing screening responses with lightweight metadata only."""
+    payload = CVScreeningResponse.model_validate(
+        {
+            "screening_id": "screening-id",
+            "jd_id": "jd-id",
+            "candidate_id": "candidate-id",
+            "file_name": "candidate.pdf",
+            "status": "processing",
+            "created_at": "2026-04-16T00:00:00Z",
+        }
+    )
+
+    assert payload.status == "processing"
+    assert payload.result is None
 
 
 def test_follow_up_question_allows_null_linked_dimension() -> None:

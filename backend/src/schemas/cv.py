@@ -3,7 +3,7 @@
 from enum import StrEnum
 from typing import ClassVar, Literal
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 from src.schemas.jd import BilingualText
 
@@ -221,12 +221,22 @@ class AuditMetadata(BaseModel):
     consistency_flags: list[str]
 
 
+class InterviewDraftPayload(BaseModel):
+    """Persisted draft state for interview preparation before publish."""
+
+    manual_questions: list[str] = Field(default_factory=list)
+    question_guidance: str | None = None
+    approved_questions: list[str] = Field(default_factory=list)
+    generated_questions: list[dict[str, object]] = Field(default_factory=list)
+
+
 class StoredScreeningPayload(BaseModel):
     """Persisted screening document stored in the database."""
 
     candidate_profile: CandidateProfilePayload
     result: ScreeningResultPayload
     audit: AuditMetadata
+    interview_draft: InterviewDraftPayload | None = None
 
 
 class CVScreeningHistoryItem(BaseModel):
@@ -247,31 +257,74 @@ class CVScreeningHistoryResponse(BaseModel):
     items: list[CVScreeningHistoryItem]
 
 
+class CVScreeningEnqueueResponse(BaseModel):
+    """API response for an enqueued CV screening job."""
+
+    job_id: str
+    screening_id: str
+    jd_id: str
+    file_name: str
+    status: Literal["processing"]
+
+
+class BackgroundJobResponse(BaseModel):
+    """API response for one background job status lookup."""
+
+    job_id: str
+    job_type: str
+    status: str
+    resource_type: str
+    resource_id: str
+    error_message: str | None = None
+    queued_at: str | None = None
+    started_at: str | None = None
+    completed_at: str | None = None
+    poll_after_ms: int | None = None
+    status_message: str | None = None
+
+
 class CVScreeningResponse(BaseModel):
-    """API response for a completed CV screening."""
+    """API response for one CV screening across processing states."""
 
     screening_id: str
     jd_id: str
     candidate_id: str
     file_name: str
-    status: Literal["completed"]
+    status: Literal["processing", "running", "completed", "failed"]
     created_at: str
-    candidate_profile: CandidateProfilePayload
-    result: ScreeningResultPayload
-    audit: AuditMetadata
+    error_message: str | None = None
+    interview_session_id: str | None = None
+    candidate_profile: CandidateProfilePayload | None = None
+    result: ScreeningResultPayload | None = None
+    audit: AuditMetadata | None = None
+    interview_draft: InterviewDraftPayload | None = None
+
+    @model_validator(mode="after")
+    def validate_completed_payload(self) -> "CVScreeningResponse":
+        """Require full payload sections once a screening has completed."""
+        if self.status == "completed" and (
+            self.candidate_profile is None or self.result is None or self.audit is None
+        ):
+            raise ValueError(
+                "Completed screening responses require candidate_profile, result, and audit"
+            )
+        return self
 
 
 __all__ = [
     "AuditMetadata",
+    "BackgroundJobResponse",
     "CandidateProfilePayload",
     "CandidateSummary",
     "CertificationItem",
+    "CVScreeningEnqueueResponse",
     "CVScreeningHistoryItem",
     "CVScreeningHistoryResponse",
     "CVScreeningResponse",
     "DimensionScore",
     "EducationItem",
     "FollowUpQuestion",
+    "InterviewDraftPayload",
     "KnockoutAssessment",
     "LanguageItem",
     "MinimumRequirementCheck",

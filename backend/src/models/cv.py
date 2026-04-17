@@ -61,6 +61,7 @@ class CandidateScreening(Base, UUIDMixin, TimestampMixin):
         nullable=False,
     )
     model_name: Mapped[str] = mapped_column(String(100), nullable=False)
+    status: Mapped[str] = mapped_column(String(50), nullable=False, default="processing")
     screening_payload: Mapped[dict[str, object]] = mapped_column(
         JSON().with_variant(JSONB, "postgresql"),
         nullable=False,
