@@ -1,5 +1,6 @@
 """CV screening service contract tests."""
 
+from datetime import UTC, datetime
 from pathlib import Path
 
 import pytest
@@ -7,9 +8,14 @@ from langchain_core.messages import HumanMessage
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from src.models.background_job import BackgroundJob
 from src.models.cv import CandidateDocument, CandidateProfile, CandidateScreening
 from src.models.jd import JDAnalysis, JDDocument
-from src.schemas.cv import CandidateProfilePayload, StoredScreeningPayload
+from src.schemas.cv import (
+    CandidateProfilePayload,
+    CVScreeningEnqueueResponse,
+    StoredScreeningPayload,
+)
 from src.schemas.jd import JDAnalysisPayload
 from src.services.cv_extractor import build_cv_extraction_prompt
 from src.services.cv_screening_service import (
@@ -19,7 +25,10 @@ from src.services.cv_screening_service import (
 )
 
 
-def sample_candidate_profile_payload() -> CandidateProfilePayload:
+def sample_candidate_profile_payload(
+    *,
+    profile_uncertainties: list[dict[str, object]] | None = None,
+) -> CandidateProfilePayload:
     """Build a valid Phase 2 candidate profile fixture."""
     return CandidateProfilePayload.model_validate(
         {
@@ -75,7 +84,7 @@ def sample_candidate_profile_payload() -> CandidateProfilePayload:
                     "evidence_excerpts": ["English"],
                 }
             ],
-            "profile_uncertainties": [],
+            "profile_uncertainties": profile_uncertainties or [],
         }
     )
 
@@ -241,13 +250,135 @@ def sample_stored_screening_payload(
     )
 
 
-class FakePhase2CVExtractor:
-    """Return a stable Phase 2 candidate profile for service tests."""
+def sample_legacy_screening_payload() -> dict[str, object]:
+    """Build a legacy screening payload fixture with stale review artifacts."""
+    return {
+        "match_score": 0.61,
+        "recommendation": "review",
+        "decision_reason": {
+            "vi": "Can xac minh them.",
+            "en": "Needs more verification.",
+        },
+        "screening_summary": {
+            "vi": "Ban ghi cu khong con dang tin cay.",
+            "en": "This legacy record is no longer trustworthy as-is.",
+        },
+        "knockout_assessments": [],
+        "minimum_requirement_checks": [],
+        "dimension_scores": [],
+        "strengths": [],
+        "gaps": [],
+        "uncertainties": [],
+        "follow_up_questions": [
+            {
+                "question": {
+                    "vi": "Ban co the lam full-time khong?",
+                    "en": "Can you work full-time?",
+                },
+                "purpose": {
+                    "vi": "Du lieu cu.",
+                    "en": "Legacy-only content.",
+                },
+            }
+        ],
+        "risk_flags": [
+            {
+                "title": {"vi": "Rui ro cu", "en": "Legacy risk"},
+                "reason": {
+                    "vi": "Khong con dang tin cay.",
+                    "en": "No longer trustworthy.",
+                },
+                "severity": "medium",
+            }
+        ],
+        "audit": {
+            "extraction_model": "gpt-4o",
+            "screening_model": "gpt-4o",
+            "profile_schema_version": "1.0",
+            "screening_schema_version": "1.0",
+            "generated_at": "2025-05-20T10:00:00Z",
+            "reconciliation_notes": [
+                "Corrected May 2025 start date to a potential typo in analysis.",
+            ],
+            "consistency_flags": [],
+        },
+    }
 
-    async def extract(self, file_path: Path, mime_type: str) -> CandidateProfilePayload:
-        """Return a valid Phase 2 candidate profile."""
-        _ = (file_path, mime_type)
-        return sample_candidate_profile_payload()
+
+def sample_legacy_profile_payload() -> dict[str, object]:
+    """Build a legacy candidate profile payload fixture."""
+    return {
+        "skills": ["JavaScript", "Python", "Redis"],
+        "education": [
+            {
+                "degree": "Bachelor of Information Technology",
+                "institution": "Hanoi University of Industry",
+                "field_of_study": "Information Technology",
+            }
+        ],
+        "languages": ["Vietnamese", "English"],
+        "experience": [
+            {
+                "role": "Full-Stack Engineer",
+                "company": "Swork JSC",
+                "summary": [
+                    "Built AI workflows.",
+                    "Owned the full-stack delivery.",
+                ],
+            }
+        ],
+        "certifications": [],
+        "candidate_summary": {
+            "location": "Hanoi, Vietnam",
+            "full_name": "NGUYEN VIET LINH",
+            "current_title": "AI Engineer",
+            "years_of_experience": 1.5,
+        },
+        "projects_or_achievements": [
+            "ATrips – AI Travel Planning Platform",
+            "Built SSE streaming for AI responses.",
+        ],
+    }
+
+
+def sample_current_shape_legacy_screening_payload() -> dict[str, object]:
+    """Build a current-shape payload that still carries stale legacy review data."""
+    payload = sample_stored_screening_payload().model_dump(mode="json")
+    payload["result"]["follow_up_questions"] = [
+        {
+            "question": {
+                "vi": "Ban co the lam full-time khong?",
+                "en": "Can you work full-time?",
+            },
+            "purpose": {
+                "vi": "Du lieu cu.",
+                "en": "Legacy-only content.",
+            },
+            "linked_dimension": None,
+        }
+    ]
+    payload["result"]["risk_flags"] = [
+        {
+            "title": {"vi": "Rui ro cu", "en": "Legacy risk"},
+            "reason": {
+                "vi": "Khong con dang tin cay.",
+                "en": "No longer trustworthy.",
+            },
+            "severity": "medium",
+        }
+    ]
+    payload["audit"] = {
+        "extraction_model": "gpt-4o",
+        "screening_model": "gpt-4o",
+        "profile_schema_version": "1.0",
+        "screening_schema_version": "1.0",
+        "generated_at": "2025-05-20T10:00:00Z",
+        "reconciliation_notes": [
+            "Corrected May 2025 start date to a potential typo in analysis.",
+        ],
+        "consistency_flags": [],
+    }
+    return payload
 
 
 class FakePhase2ScreeningInvoker:
@@ -311,18 +442,23 @@ def test_build_screening_prompt_mentions_knockouts_and_must_have_rules() -> None
     assert "knockout" in prompt.lower()
     assert "must-have" in prompt.lower()
     assert "structured output" in prompt.lower()
+    assert "current vietnam datetime" in prompt.lower()
+    assert "past year" in prompt.lower()
     assert StoredScreeningPayload.__name__ in prompt
 
 
 @pytest.mark.asyncio
-async def test_screening_adapter_validates_stored_screening_payload() -> None:
+async def test_screening_adapter_validates_stored_screening_payload(tmp_path: Path) -> None:
     """Ensure the screening adapter validates the stored screening schema."""
     service = CVScreeningService.__new__(CVScreeningService)
     service._screening_llm = FakeStructuredScreeningInvoker()  # pyright: ignore[reportPrivateUsage]
 
+    file_path = tmp_path / "candidate.pdf"
+    _ = file_path.write_bytes(b"%PDF-1.7\ncandidate")
     payload = await service._generate_screening_payload(  # pyright: ignore[reportPrivateUsage]
         jd_analysis=JDAnalysisPayload.model_validate(sample_jd_analysis_payload()),
-        candidate_profile=sample_candidate_profile_payload(),
+        file_path=file_path,
+        mime_type="application/pdf",
     )
 
     assert payload.result.recommendation == "advance"
@@ -382,6 +518,109 @@ def test_reconcile_screening_marks_missing_must_have_evidence_as_unclear() -> No
     )
 
 
+def test_reconcile_screening_removes_stale_future_timeline_uncertainty() -> None:
+    """Remove timeline anomalies that are no longer future-dated."""
+    service = CVScreeningService.__new__(CVScreeningService)
+    payload = sample_stored_screening_payload()
+    payload = payload.model_copy(
+        update={
+            "candidate_profile": sample_candidate_profile_payload(
+                profile_uncertainties=[
+                    {
+                        "title": {
+                            "vi": "Mâu thuẫn về thời gian",
+                            "en": "Timeline Anomaly",
+                        },
+                        "reason": {
+                            "vi": "Work experience dates are listed as 2025 and 2026.",
+                            "en": (
+                                "Work experience dates are listed as 2025 and 2026, "
+                                "which are in the future relative to current standard "
+                                "screening periods."
+                            ),
+                        },
+                        "impact": {
+                            "vi": "Cần xác minh lại.",
+                            "en": "Need to verify the timeline.",
+                        },
+                    }
+                ]
+            )
+        },
+        deep=True,
+    )
+
+    reconciled = service._reconcile_screening_payload(payload)  # pyright: ignore[reportPrivateUsage]
+
+    assert reconciled.candidate_profile.profile_uncertainties == []
+    assert any(
+        "stale future-date timeline uncertainty" in note.lower()
+        for note in reconciled.audit.reconciliation_notes
+    )
+
+
+def test_normalize_stored_screening_payload_sanitizes_legacy_content() -> None:
+    """Ensure legacy payloads are normalized before the API uses them."""
+    service = CVScreeningService.__new__(CVScreeningService)
+    candidate_profile = sample_candidate_profile_payload()
+
+    normalized = service._normalize_stored_screening_payload(  # pyright: ignore[reportPrivateUsage]
+        screening_payload=sample_legacy_screening_payload(),
+        candidate_profile_payload=candidate_profile.model_dump(mode="json"),
+        model_name="gemini-2.5-pro",
+        created_at=datetime(2026, 4, 16, tzinfo=UTC),
+    )
+
+    assert normalized.candidate_profile == candidate_profile
+    assert normalized.result.follow_up_questions == []
+    assert normalized.result.risk_flags == []
+    assert normalized.audit.extraction_model == "gemini-2.5-pro"
+    assert normalized.audit.screening_model == "gemini-2.5-pro"
+    assert normalized.audit.generated_at == "2026-04-16T07:00:00+07:00"
+    assert any(
+        "legacy" in note.lower()
+        for note in normalized.audit.reconciliation_notes
+    )
+
+
+def test_normalize_stored_screening_payload_accepts_legacy_profile_payload() -> None:
+    """Ensure legacy candidate profiles are adapted before screening normalization."""
+    service = CVScreeningService.__new__(CVScreeningService)
+
+    normalized = service._normalize_stored_screening_payload(  # pyright: ignore[reportPrivateUsage]
+        screening_payload=sample_legacy_screening_payload(),
+        candidate_profile_payload=sample_legacy_profile_payload(),
+        model_name="gemini-2.5-pro",
+        created_at=datetime(2026, 4, 16, tzinfo=UTC),
+    )
+
+    assert normalized.candidate_profile.candidate_summary.full_name == "NGUYEN VIET LINH"
+    assert normalized.candidate_profile.candidate_summary.total_years_experience == 1.5
+    assert normalized.candidate_profile.candidate_summary.seniority_signal == "unknown"
+    assert normalized.candidate_profile.skills_inventory[0].skill_name == "JavaScript"
+    assert normalized.candidate_profile.languages[0].language_name == "Vietnamese"
+
+
+def test_normalize_stored_screening_payload_sanitizes_legacy_schema_versions() -> None:
+    """Ensure current-shape payloads with legacy schema versions are sanitized too."""
+    service = CVScreeningService.__new__(CVScreeningService)
+    candidate_profile = sample_candidate_profile_payload()
+
+    normalized = service._normalize_stored_screening_payload(  # pyright: ignore[reportPrivateUsage]
+        screening_payload=sample_current_shape_legacy_screening_payload(),
+        candidate_profile_payload=candidate_profile.model_dump(mode="json"),
+        model_name="gemini-2.5-pro",
+        created_at=datetime(2026, 4, 16, tzinfo=UTC),
+    )
+
+    assert normalized.result.follow_up_questions == []
+    assert normalized.result.risk_flags == []
+    assert normalized.audit.extraction_model == "gemini-2.5-pro"
+    assert normalized.audit.generated_at == "2026-04-16T07:00:00+07:00"
+    assert normalized.audit.profile_schema_version == "phase2.v1"
+    assert normalized.audit.screening_schema_version == "phase2.v2"
+
+
 @pytest.fixture
 async def seeded_jd_analysis_id(db_session: AsyncSession) -> str:
     """Seed one completed JD analysis for Phase 2 screening tests."""
@@ -405,6 +644,101 @@ async def seeded_jd_analysis_id(db_session: AsyncSession) -> str:
 
 
 @pytest.mark.asyncio
+async def test_enqueue_screening_creates_processing_screening_and_job(
+    db_session: AsyncSession,
+    tmp_path: Path,
+    seeded_jd_analysis_id: str,
+) -> None:
+    """Enqueueing screening should persist a processing screening and job."""
+    service = CVScreeningService(upload_dir=tmp_path, db_session=db_session)
+
+    response = await service.enqueue_screening_upload(
+        jd_id=seeded_jd_analysis_id,
+        file_name="candidate.pdf",
+        mime_type="application/pdf",
+        file_bytes=b"%PDF-1.7\ncandidate",
+    )
+
+    screening = await db_session.scalar(
+        select(CandidateScreening).where(CandidateScreening.id == response.screening_id)
+    )
+    job = await db_session.scalar(select(BackgroundJob).where(BackgroundJob.id == response.job_id))
+
+    assert isinstance(response, CVScreeningEnqueueResponse)
+    assert response.status == "processing"
+    assert screening is not None
+    assert screening.status == "processing"
+    assert job is not None
+    assert job.job_type == "cv_screening"
+
+
+@pytest.mark.asyncio
+async def test_run_cv_job_completes_screening(
+    db_session: AsyncSession,
+    tmp_path: Path,
+    seeded_jd_analysis_id: str,
+) -> None:
+    """Running a CV job should persist a completed screening result."""
+    service = CVScreeningService(
+        upload_dir=tmp_path,
+        db_session=db_session,
+    )
+    service._screening_llm = FakePhase2ScreeningInvoker()  # pyright: ignore[reportPrivateUsage]
+
+    response = await service.enqueue_screening_upload(
+        jd_id=seeded_jd_analysis_id,
+        file_name="candidate.pdf",
+        mime_type="application/pdf",
+        file_bytes=b"%PDF-1.7\ncandidate",
+    )
+
+    await service.run_screening_job(response.screening_id)
+
+    screening = await db_session.scalar(
+        select(CandidateScreening).where(CandidateScreening.id == response.screening_id)
+    )
+
+    assert screening is not None
+    assert screening.status == "completed"
+    assert screening.screening_payload["result"]["recommendation"] == "advance"
+
+
+@pytest.mark.asyncio
+async def test_mark_screening_failed_sets_screening_and_document_failed(
+    db_session: AsyncSession,
+    tmp_path: Path,
+    seeded_jd_analysis_id: str,
+) -> None:
+    """Marking a screening failed should update both screening and document."""
+    service = CVScreeningService(upload_dir=tmp_path, db_session=db_session)
+    response = await service.enqueue_screening_upload(
+        jd_id=seeded_jd_analysis_id,
+        file_name="candidate.pdf",
+        mime_type="application/pdf",
+        file_bytes=b"%PDF-1.7\ncandidate",
+    )
+
+    await service.mark_screening_failed(response.screening_id, "Gemini timeout")
+
+    screening = await db_session.scalar(
+        select(CandidateScreening).where(CandidateScreening.id == response.screening_id)
+    )
+    profile = await db_session.scalar(
+        select(CandidateProfile).where(CandidateProfile.id == screening.candidate_profile_id)
+    )
+    document = await db_session.scalar(
+        select(CandidateDocument).where(CandidateDocument.id == profile.candidate_document_id)
+    )
+
+    assert screening is not None
+    assert profile is not None
+    assert document is not None
+    assert screening.status == "failed"
+    assert document.status == "failed"
+    assert screening.screening_payload == {}
+
+
+@pytest.mark.asyncio
 async def test_screening_service_persists_phase_2_profile_and_screening(
     db_session: AsyncSession,
     tmp_path: Path,
@@ -412,7 +746,6 @@ async def test_screening_service_persists_phase_2_profile_and_screening(
 ) -> None:
     """Ensure the Phase 2 service persists both profile and screening artifacts."""
     service = CVScreeningService(
-        extractor=FakePhase2CVExtractor(),
         upload_dir=tmp_path,
         db_session=db_session,
     )
@@ -438,8 +771,33 @@ async def test_screening_service_persists_phase_2_profile_and_screening(
 
     assert response.candidate_profile.candidate_summary.full_name == "Nguyen Van A"
     assert response.audit.profile_schema_version == "phase2.v1"
+    assert response.audit.screening_schema_version == "phase2.v2"
     assert stored_profile is not None
     assert stored_screening is not None
+    assert stored_profile.profile_payload["candidate_summary"]["full_name"] == "Nguyen Van A"
+
+
+@pytest.mark.asyncio
+async def test_get_screening_returns_processing_response_for_inflight_row(
+    db_session: AsyncSession,
+    tmp_path: Path,
+    seeded_jd_analysis_id: str,
+) -> None:
+    """Return lightweight metadata for screenings that have not completed yet."""
+    service = CVScreeningService(upload_dir=tmp_path, db_session=db_session)
+    created = await service.enqueue_screening_upload(
+        jd_id=seeded_jd_analysis_id,
+        file_name="candidate.pdf",
+        mime_type="application/pdf",
+        file_bytes=b"%PDF-1.7\ncandidate",
+    )
+
+    fetched = await service.get_screening(created.screening_id)
+
+    assert fetched is not None
+    assert fetched.status == "processing"
+    assert fetched.result is None
+    assert fetched.audit is None
 
 
 @pytest.mark.asyncio
@@ -450,7 +808,6 @@ async def test_get_screening_returns_phase_2_response(
 ) -> None:
     """Ensure the persisted screening is returned in the new response shape."""
     service = CVScreeningService(
-        extractor=FakePhase2CVExtractor(),
         upload_dir=tmp_path,
         db_session=db_session,
     )
@@ -477,7 +834,6 @@ async def test_list_screenings_for_jd_returns_newest_first(
 ) -> None:
     """Return persisted screenings for one JD in reverse chronological order."""
     service = CVScreeningService(
-        extractor=FakePhase2CVExtractor(),
         upload_dir=tmp_path,
         db_session=db_session,
     )
@@ -554,13 +910,121 @@ async def test_list_screenings_for_jd_supports_legacy_screening_payload(
 
 
 @pytest.mark.asyncio
+async def test_get_screening_normalizes_legacy_payload(
+    db_session: AsyncSession,
+) -> None:
+    """Ensure detail loading sanitizes legacy screening records."""
+    candidate_document = CandidateDocument(
+        file_name="candidate.pdf",
+        mime_type="application/pdf",
+        storage_path="/tmp/candidate.pdf",
+        status="completed",
+    )
+    db_session.add(candidate_document)
+    await db_session.flush()
+
+    candidate_profile = CandidateProfile(
+        candidate_document_id=candidate_document.id,
+        profile_payload=sample_candidate_profile_payload().model_dump(mode="json"),
+    )
+    db_session.add(candidate_profile)
+    await db_session.flush()
+
+    screening = CandidateScreening(
+        jd_document_id="jd-1",
+        candidate_profile_id=candidate_profile.id,
+        model_name="gemini-2.5-pro",
+        status="completed",
+        screening_payload=sample_legacy_screening_payload(),
+    )
+    db_session.add(screening)
+    await db_session.commit()
+
+    service = CVScreeningService(upload_dir=Path("/tmp"), db_session=db_session)
+    result = await service.get_screening(screening.id)
+
+    assert result is not None
+    assert result.audit.extraction_model == "gemini-2.5-pro"
+    assert result.result.follow_up_questions == []
+    assert result.result.risk_flags == []
+
+
+@pytest.mark.asyncio
+async def test_get_screening_returns_failed_response_with_job_error(
+    db_session: AsyncSession,
+    tmp_path: Path,
+    seeded_jd_analysis_id: str,
+) -> None:
+    """Return failed metadata and job error for a failed screening."""
+    service = CVScreeningService(upload_dir=tmp_path, db_session=db_session)
+    created = await service.enqueue_screening_upload(
+        jd_id=seeded_jd_analysis_id,
+        file_name="candidate.pdf",
+        mime_type="application/pdf",
+        file_bytes=b"%PDF-1.7\ncandidate",
+    )
+    await service.mark_screening_failed(created.screening_id, "Gemini timeout")
+    job = await db_session.scalar(select(BackgroundJob).where(BackgroundJob.id == created.job_id))
+    assert job is not None
+    job.status = "failed"
+    job.error_message = "Gemini timeout"
+    await db_session.commit()
+
+    fetched = await service.get_screening(created.screening_id)
+
+    assert fetched is not None
+    assert fetched.status == "failed"
+    assert fetched.error_message == "Gemini timeout"
+    assert fetched.result is None
+
+
+@pytest.mark.asyncio
+async def test_backfill_legacy_screening_payload_updates_stored_row(
+    db_session: AsyncSession,
+) -> None:
+    """Ensure backfill rewrites a legacy payload into the current stored shape."""
+    candidate_document = CandidateDocument(
+        file_name="candidate.pdf",
+        mime_type="application/pdf",
+        storage_path="/tmp/candidate.pdf",
+        status="completed",
+    )
+    db_session.add(candidate_document)
+    await db_session.flush()
+
+    candidate_profile = CandidateProfile(
+        candidate_document_id=candidate_document.id,
+        profile_payload=sample_candidate_profile_payload().model_dump(mode="json"),
+    )
+    db_session.add(candidate_profile)
+    await db_session.flush()
+
+    screening = CandidateScreening(
+        jd_document_id="jd-1",
+        candidate_profile_id=candidate_profile.id,
+        model_name="gemini-2.5-pro",
+        screening_payload=sample_legacy_screening_payload(),
+    )
+    db_session.add(screening)
+    await db_session.commit()
+
+    service = CVScreeningService(upload_dir=Path("/tmp"), db_session=db_session)
+
+    changed = await service.backfill_screening_payload(screening.id)
+    await db_session.refresh(screening)
+
+    assert changed is True
+    assert "candidate_profile" in screening.screening_payload
+    assert screening.screening_payload["result"]["follow_up_questions"] == []
+
+
+@pytest.mark.asyncio
 async def test_screening_service_raises_when_jd_is_missing(
     db_session: AsyncSession,
     tmp_path: Path,
 ) -> None:
     """Ensure missing JD analysis still fails before screening starts."""
     service = CVScreeningService(
-        extractor=FakePhase2CVExtractor(),
         upload_dir=tmp_path,
         db_session=db_session,
     )

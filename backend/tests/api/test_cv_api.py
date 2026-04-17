@@ -12,7 +12,13 @@ from pytest import MonkeyPatch
 
 from src.database import get_db
 from src.main import app
-from src.schemas.cv import CVScreeningHistoryResponse, CVScreeningResponse
+from src.models.background_job import BackgroundJob
+from src.schemas.cv import (
+    BackgroundJobResponse,
+    CVScreeningEnqueueResponse,
+    CVScreeningHistoryResponse,
+    CVScreeningResponse,
+)
 
 
 class FakeCVScreeningService:
@@ -99,8 +105,116 @@ class FakeCVScreeningService:
             }
         )
 
+    async def enqueue_screening_upload(
+        self,
+        jd_id: str,
+        file_name: str,
+        mime_type: str,
+        file_bytes: bytes,
+    ) -> CVScreeningEnqueueResponse:
+        """Return an enqueue response for async CV screening."""
+        _ = (mime_type, file_bytes)
+        if type(self).missing_jd:
+            from src.services.cv_screening_service import JDNotReadyError
+
+            raise JDNotReadyError("JD analysis not found or not ready")
+        return CVScreeningEnqueueResponse(
+            job_id="test-job-id",
+            screening_id="test-screening-id",
+            jd_id=jd_id,
+            file_name=file_name,
+            status="processing",
+        )
+
     async def get_screening(self, screening_id: str) -> CVScreeningResponse | None:
         """Return one stored screening fixture when the id matches."""
+        if screening_id == "processing-screening-id":
+            return CVScreeningResponse.model_validate(
+                {
+                    "screening_id": screening_id,
+                    "jd_id": "test-jd-id",
+                    "candidate_id": "candidate-id",
+                    "file_name": "candidate.pdf",
+                    "status": "processing",
+                    "created_at": "2026-04-16T00:00:00Z",
+                }
+            )
+        if screening_id == "failed-screening-id":
+            return CVScreeningResponse.model_validate(
+                {
+                    "screening_id": screening_id,
+                    "jd_id": "test-jd-id",
+                    "candidate_id": "candidate-id",
+                    "file_name": "candidate.pdf",
+                    "status": "failed",
+                    "created_at": "2026-04-16T00:00:00Z",
+                    "error_message": "Gemini request timed out",
+                }
+            )
+        if screening_id == "legacy-screening-id":
+            return CVScreeningResponse.model_validate(
+                {
+                    "screening_id": screening_id,
+                    "jd_id": "test-jd-id",
+                    "candidate_id": "candidate-id",
+                    "file_name": "candidate.pdf",
+                    "status": "completed",
+                    "created_at": "2026-04-16T00:00:00Z",
+                    "candidate_profile": {
+                        "candidate_summary": {
+                            "full_name": "Nguyen Van A",
+                            "current_title": "Backend Engineer",
+                            "location": "Ho Chi Minh City",
+                            "total_years_experience": 4,
+                            "seniority_signal": "mid",
+                            "professional_summary": {
+                                "vi": "Kỹ sư backend tập trung vào Python.",
+                                "en": "Backend engineer focused on Python.",
+                            },
+                        },
+                        "work_experience": [],
+                        "projects": [],
+                        "skills_inventory": [],
+                        "education": [],
+                        "certifications": [],
+                        "languages": [],
+                        "profile_uncertainties": [],
+                    },
+                    "result": {
+                        "match_score": 0.61,
+                        "recommendation": "review",
+                        "decision_reason": {
+                            "vi": "Ban ghi legacy da duoc lam sach.",
+                            "en": "The legacy record was sanitized.",
+                        },
+                        "screening_summary": {
+                            "vi": "Da loai bo noi dung cu khong dang tin cay.",
+                            "en": "Stale legacy content has been removed.",
+                        },
+                        "knockout_assessments": [],
+                        "minimum_requirement_checks": [],
+                        "dimension_scores": [],
+                        "strengths": [],
+                        "gaps": [],
+                        "uncertainties": [],
+                        "follow_up_questions": [],
+                        "risk_flags": [],
+                    },
+                    "audit": {
+                        "extraction_model": "gemini-2.5-pro",
+                        "screening_model": "gemini-2.5-pro",
+                        "profile_schema_version": "phase2.v1",
+                        "screening_schema_version": "phase2.v1",
+                        "generated_at": "2026-04-16T00:00:00Z",
+                        "reconciliation_notes": [
+                            "Sanitized a legacy screening payload and removed stale follow-up questions, risk flags, and audit metadata.",
+                        ],
+                        "consistency_flags": [
+                            "Legacy screening payload was normalized from a pre-phase2 schema.",
+                        ],
+                    },
+                }
+            )
         if screening_id != "test-screening-id":
             return None
         return await self.screen_upload(
@@ -116,6 +230,20 @@ class FakeCVScreeningService:
             {
                 "screening_id": "test-screening-id",
                 "jd_id": jd_id,
+                "candidate_id": "candidate-id",
+                "file_name": "candidate.pdf",
+                "created_at": "2026-04-16T00:00:00Z",
+                "recommendation": "review",
+                "match_score": 0.72,
+            }
+        ]
+
+    async def list_all_screenings(self) -> list[dict[str, object]]:
+        """Return lightweight screening history across all JDs."""
+        return [
+            {
+                "screening_id": "test-screening-id",
+                "jd_id": "test-jd-id",
                 "candidate_id": "candidate-id",
                 "file_name": "candidate.pdf",
                 "created_at": "2026-04-16T00:00:00Z",
@@ -157,7 +285,7 @@ def build_docx_bytes() -> bytes:
 
 
 def test_cv_screen_endpoint_returns_phase_2_payload(monkeypatch: MonkeyPatch) -> None:
-    """Return the Phase 2 payload from the create screening route."""
+    """Return the processing payload from the create screening route."""
     stub_cv_service(monkeypatch)
     client = build_client(monkeypatch)
 
@@ -167,11 +295,30 @@ def test_cv_screen_endpoint_returns_phase_2_payload(monkeypatch: MonkeyPatch) ->
         files={"file": ("candidate.pdf", b"%PDF-1.7\ncandidate", "application/pdf")},
     )
 
-    assert response.status_code == 200
-    payload = CVScreeningResponse.model_validate(response.json())
-    assert payload.candidate_profile.candidate_summary.full_name == "Nguyen Van A"
-    assert payload.result.screening_summary.en == "Strong fit for backend fundamentals."
-    assert payload.audit.profile_schema_version == "phase2.v1"
+    assert response.status_code == 202
+    payload = CVScreeningEnqueueResponse.model_validate(response.json())
+    assert payload.job_id == "test-job-id"
+    assert payload.screening_id == "test-screening-id"
+    assert payload.jd_id == "test-jd-id"
+
+
+def test_cv_screen_returns_processing_enqueue_response(monkeypatch: MonkeyPatch) -> None:
+    """CV screen should return a processing response with both ids."""
+    stub_cv_service(monkeypatch)
+    client = build_client(monkeypatch)
+
+    response = client.post(
+        "/api/v1/cv/screen",
+        data={"jd_id": "test-jd-id"},
+        files={"file": ("candidate.pdf", b"%PDF-1.7\ncandidate", "application/pdf")},
+    )
+
+    assert response.status_code == 202
+    payload = response.json()
+    assert payload["status"] == "processing"
+    assert payload["jd_id"] == "test-jd-id"
+    assert "job_id" in payload
+    assert "screening_id" in payload
 
 
 def test_cv_screen_endpoint_rejects_unsupported_file_type(
@@ -212,6 +359,21 @@ def test_cv_screen_endpoint_rejects_invalid_docx_content(
     assert response.json() == {"detail": "File content does not match content type"}
 
 
+def test_cv_screen_endpoint_accepts_pdf_with_leading_newline(monkeypatch: MonkeyPatch) -> None:
+    """Accept PDF uploads whose file header appears after leading whitespace."""
+    stub_cv_service(monkeypatch)
+    client = build_client(monkeypatch)
+
+    response = client.post(
+        "/api/v1/cv/screen",
+        data={"jd_id": "test-jd-id"},
+        files={"file": ("candidate.pdf", b"\n%PDF-1.7\ncandidate", "application/pdf")},
+    )
+
+    assert response.status_code == 202
+    assert response.json()["file_name"] == "candidate.pdf"
+
+
 def test_cv_screen_endpoint_accepts_valid_docx_upload(monkeypatch: MonkeyPatch) -> None:
     """Accept valid DOCX uploads for CV screening."""
     stub_cv_service(monkeypatch)
@@ -229,7 +391,7 @@ def test_cv_screen_endpoint_accepts_valid_docx_upload(monkeypatch: MonkeyPatch) 
         },
     )
 
-    assert response.status_code == 200
+    assert response.status_code == 202
     assert response.json()["file_name"] == "candidate.docx"
 
 
@@ -263,6 +425,47 @@ def test_cv_screening_detail_returns_phase_2_payload(monkeypatch: MonkeyPatch) -
     assert payload.audit.screening_schema_version == "phase2.v1"
 
 
+def test_get_cv_screening_returns_sanitized_legacy_payload(monkeypatch: MonkeyPatch) -> None:
+    """Return sanitized values for legacy screening records."""
+    stub_cv_service(monkeypatch)
+    client = build_client(monkeypatch)
+
+    response = client.get("/api/v1/cv/screenings/legacy-screening-id")
+
+    assert response.status_code == 200
+    payload = CVScreeningResponse.model_validate(response.json())
+    assert payload.result.follow_up_questions == []
+    assert payload.result.risk_flags == []
+    assert payload.audit.generated_at == "2026-04-16T00:00:00Z"
+    assert payload.audit.extraction_model == "gemini-2.5-pro"
+
+
+def test_cv_screening_detail_returns_processing_payload(monkeypatch: MonkeyPatch) -> None:
+    """Return lightweight metadata while a screening is still processing."""
+    stub_cv_service(monkeypatch)
+    client = build_client(monkeypatch)
+
+    response = client.get("/api/v1/cv/screenings/processing-screening-id")
+
+    assert response.status_code == 200
+    payload = CVScreeningResponse.model_validate(response.json())
+    assert payload.status == "processing"
+    assert payload.result is None
+
+
+def test_cv_screening_detail_returns_failed_payload(monkeypatch: MonkeyPatch) -> None:
+    """Return lightweight failure metadata when a screening has failed."""
+    stub_cv_service(monkeypatch)
+    client = build_client(monkeypatch)
+
+    response = client.get("/api/v1/cv/screenings/failed-screening-id")
+
+    assert response.status_code == 200
+    payload = CVScreeningResponse.model_validate(response.json())
+    assert payload.status == "failed"
+    assert payload.error_message == "Gemini request timed out"
+
+
 def test_cv_screening_detail_returns_not_found(monkeypatch: MonkeyPatch) -> None:
     """Return 404 when a screening id does not exist."""
     stub_cv_service(monkeypatch)
@@ -285,3 +488,48 @@ def test_cv_screening_history_returns_items(monkeypatch: MonkeyPatch) -> None:
     payload = CVScreeningHistoryResponse.model_validate(response.json())
     assert payload.items[0].screening_id == "test-screening-id"
     assert payload.items[0].jd_id == "test-jd-id"
+
+
+def test_list_all_cv_screenings_returns_items(monkeypatch: MonkeyPatch) -> None:
+    """Return lightweight screening history across all JDs."""
+    stub_cv_service(monkeypatch)
+    client = build_client(monkeypatch)
+
+    response = client.get("/api/v1/cv/screenings")
+
+    assert response.status_code == 200
+    payload = CVScreeningHistoryResponse.model_validate(response.json())
+    assert payload.items[0].screening_id == "test-screening-id"
+    assert payload.items[0].jd_id == "test-jd-id"
+
+
+def test_get_job_status_returns_resource_tracking_fields(monkeypatch: MonkeyPatch) -> None:
+    """Return background job status with resource tracking information."""
+    client = build_client(monkeypatch)
+
+    class FakeSession:
+        async def scalar(self, statement: object) -> BackgroundJob | None:
+            _ = statement
+            return BackgroundJob(
+                id="test-job-id",
+                job_type="cv_screening",
+                status="running",
+                resource_type="candidate_screening",
+                resource_id="screening-id",
+                payload={},
+            )
+
+    async def fake_db_session():
+        yield FakeSession()
+
+    app.dependency_overrides[get_db] = fake_db_session
+    response = client.get("/api/v1/jobs/test-job-id")
+
+    assert response.status_code == 200
+    payload = BackgroundJobResponse.model_validate(response.json())
+    assert payload.job_id == "test-job-id"
+    assert payload.status == "running"
+    assert payload.resource_type == "candidate_screening"
+    assert payload.resource_id == "screening-id"
+    assert payload.poll_after_ms == 2500
+    assert payload.status_message == "Background processing is in progress."
