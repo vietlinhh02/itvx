@@ -148,14 +148,64 @@ export type CVScreeningHistoryResponse = {
   items: CVScreeningHistoryItem[]
 }
 
-export type CVScreeningResponse = {
+export type CVScreeningEnqueueResponse = {
+  job_id: string
+  screening_id: string
+  jd_id: string
+  file_name: string
+  status: "processing"
+}
+
+export type BackgroundJobStatus = "queued" | "running" | "completed" | "failed"
+
+export type BackgroundJobResponse = {
+  job_id: string
+  job_type: string
+  status: BackgroundJobStatus
+  resource_type: string
+  resource_id: string
+  error_message: string | null
+  queued_at: string | null
+  started_at: string | null
+  completed_at: string | null
+  poll_after_ms: number | null
+  status_message: string | null
+}
+
+type CVScreeningResponseBase = {
   screening_id: string
   jd_id: string
   candidate_id: string
   file_name: string
-  status: "completed"
   created_at: string
+  error_message: string | null
+  interview_session_id?: string | null
+}
+
+export type CVScreeningProcessingResponse = CVScreeningResponseBase & {
+  status: "processing" | "running"
+  candidate_profile?: undefined
+  result?: undefined
+  audit?: undefined
+}
+
+export type CVScreeningFailedResponse = CVScreeningResponseBase & {
+  status: "failed"
+  candidate_profile?: undefined
+  result?: undefined
+  audit?: undefined
+}
+
+export type InterviewDraft = {
+  manual_questions: string[]
+  question_guidance: string | null
+  approved_questions: string[]
+}
+
+export type CVScreeningCompletedResponse = CVScreeningResponseBase & {
+  status: "completed"
   candidate_profile: CandidateProfile
+  interview_draft?: InterviewDraft | null
   result: {
     match_score: number
     recommendation: ScreeningRecommendation
@@ -172,3 +222,10 @@ export type CVScreeningResponse = {
   }
   audit: AuditMetadata
 }
+
+export type CVScreeningResponse =
+  | CVScreeningProcessingResponse
+  | CVScreeningFailedResponse
+  | CVScreeningCompletedResponse
+
+export type ScreeningResult = CVScreeningCompletedResponse["result"]
