@@ -8,10 +8,14 @@
     "start": "next start",
     "lint": "eslint .",
     "lint:fix": "eslint . --fix",
-    "type-check": "tsc --noEmit"
+    "type-check": "tsc --noEmit",
+    "test": "vitest run"
   },
   "dependencies": {
+    "@livekit/components-react": "^2.9.20",
+    "@livekit/components-styles": "^1.2.0",
     "@phosphor-icons/react": "^2.1.10",
+    "livekit-client": "^2.18.3",
     "next": "16.2.4",
     "next-auth": "4.24.14",
     "react": "19.2.5",
@@ -22,11 +26,16 @@
   "devDependencies": {
     "@eslint/eslintrc": "^3.3.5",
     "@tailwindcss/postcss": "^4.0.0",
+    "@testing-library/jest-dom": "^6.9.1",
+    "@testing-library/react": "^16.3.0",
+    "@testing-library/user-event": "^14.6.1",
     "@types/node": "^22.10.0",
     "@types/react": "19.2.14",
     "@types/react-dom": "19.2.3",
     "eslint": "^9.39.1",
     "eslint-config-next": "16.2.4",
-    "typescript": "^5.7.0"
+    "jsdom": "^26.1.0",
+    "typescript": "^5.7.0",
+    "vitest": "^4.0.7"
   }
 }
