@@ -47,6 +47,8 @@ share/python-wheels/
 .installed.cfg
 *.egg
 MANIFEST
+.omx
+frontend/.next
 
 # PyInstaller
 *.manifest
@@ -70,7 +72,7 @@ coverage.xml
 .hypothesis/
 .pytest_cache/
 cover/
-
+backend/storage
 # Jupyter Notebook
 .ipynb_checkpoints
 
