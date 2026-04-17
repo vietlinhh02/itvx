@@ -1,4 +1,4 @@
-import type { CVScreeningResponse } from "@/components/jd/cv-screening-types"
+import type { ScreeningResult } from "@/components/jd/cv-screening-types"
 import {
   BilingualBlock,
   EmptyValue,
@@ -11,24 +11,24 @@ export function CVScreeningAssessments({
   knockoutAssessments,
   minimumRequirements,
 }: {
-  knockoutAssessments: CVScreeningResponse["result"]["knockout_assessments"]
-  minimumRequirements: CVScreeningResponse["result"]["minimum_requirement_checks"]
+  knockoutAssessments: ScreeningResult["knockout_assessments"]
+  minimumRequirements: ScreeningResult["minimum_requirement_checks"]
 }) {
   return (
     <ReviewSection
-      title="Requirement Assessments"
-      description="Knockout and minimum requirement checks used for the final recommendation."
+      title="Đánh giá yêu cầu"
+      description="Các kiểm tra loại trực tiếp và yêu cầu tối thiểu được dùng cho khuyến nghị cuối."
     >
       <div className="grid gap-6 xl:grid-cols-2">
         <AssessmentGroup
-          title="Knockout assessments"
+          title="Đánh giá loại trực tiếp"
           items={knockoutAssessments}
-          emptyText="No knockout rules"
+          emptyText="Không có quy tắc loại trực tiếp"
         />
         <AssessmentGroup
-          title="Minimum requirements"
+          title="Yêu cầu tối thiểu"
           items={minimumRequirements}
-          emptyText="No minimum requirements"
+          emptyText="Không có yêu cầu tối thiểu"
         />
       </div>
     </ReviewSection>
@@ -41,7 +41,7 @@ function AssessmentGroup({
   emptyText,
 }: {
   title: string
-  items: CVScreeningResponse["result"]["knockout_assessments"]
+  items: ScreeningResult["knockout_assessments"]
   emptyText: string
 }) {
   return (

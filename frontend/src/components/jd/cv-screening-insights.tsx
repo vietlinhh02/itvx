@@ -1,4 +1,4 @@
-import type { CVScreeningResponse } from "@/components/jd/cv-screening-types"
+import type { ScreeningResult } from "@/components/jd/cv-screening-types"
 import { EmptyValue, EvidenceList, ReviewSection } from "@/components/jd/cv-screening-ui"
 
 export function CVScreeningInsights({
@@ -6,18 +6,18 @@ export function CVScreeningInsights({
   gaps,
   uncertainties,
 }: {
-  strengths: CVScreeningResponse["result"]["strengths"]
-  gaps: CVScreeningResponse["result"]["gaps"]
-  uncertainties: CVScreeningResponse["result"]["uncertainties"]
+  strengths: ScreeningResult["strengths"]
+  gaps: ScreeningResult["gaps"]
+  uncertainties: ScreeningResult["uncertainties"]
 }) {
   return (
     <ReviewSection
-      title="Insights"
-      description="Strengths, gaps, and unresolved uncertainties extracted from the screening output."
+      title="Nhận định nổi bật"
+      description="Tóm tắt những điểm mạnh, điểm còn thiếu và các phần cần xác minh thêm từ kết quả sàng lọc."
     >
       <div className="grid gap-6 xl:grid-cols-3">
-        <InsightGroup items={strengths} title="Strengths" emptyText="No strengths" />
-        <InsightGroup items={gaps} title="Gaps" emptyText="No gaps" />
+        <InsightGroup items={strengths} title="Điểm mạnh" emptyText="Không có điểm mạnh" />
+        <InsightGroup items={gaps} title="Điểm còn thiếu" emptyText="Không có điểm còn thiếu đáng chú ý" />
         <UncertaintyGroup items={uncertainties} />
       </div>
     </ReviewSection>
@@ -30,7 +30,7 @@ function InsightGroup({
   emptyText,
 }: {
   title: string
-  items: CVScreeningResponse["result"]["strengths"]
+  items: ScreeningResult["strengths"]
   emptyText: string
 }) {
   return (
@@ -40,10 +40,10 @@ function InsightGroup({
         {items.length ? (
           items.map((item) => (
             <article className="rounded-[16px] border border-[var(--color-brand-input-border)] p-4" key={item.title.en}>
-              <p className="text-sm font-semibold text-[var(--color-brand-text-primary)]">{item.title.en}</p>
-              <p className="mt-1 text-sm text-[var(--color-brand-text-muted)]">{item.title.vi}</p>
-              <p className="mt-3 text-sm text-[var(--color-brand-text-body)]">{item.reason.en}</p>
-              <p className="mt-1 text-sm text-[var(--color-brand-text-muted)]">{item.reason.vi}</p>
+              <p className="text-sm font-semibold text-[var(--color-brand-text-primary)]">{item.title.vi}</p>
+              <p className="mt-1 text-sm text-[var(--color-brand-text-muted)]">{item.title.en}</p>
+              <p className="mt-3 text-sm text-[var(--color-brand-text-body)]">{item.reason.vi}</p>
+              <p className="mt-1 text-sm text-[var(--color-brand-text-muted)]">{item.reason.en}</p>
               <EvidenceList items={item.evidence} />
             </article>
           ))
@@ -58,29 +58,29 @@ function InsightGroup({
 function UncertaintyGroup({
   items,
 }: {
-  items: CVScreeningResponse["result"]["uncertainties"]
+  items: ScreeningResult["uncertainties"]
 }) {
   return (
     <section>
-      <p className="text-sm font-semibold text-[var(--color-brand-text-primary)]">Uncertainties</p>
+      <p className="text-sm font-semibold text-[var(--color-brand-text-primary)]">Điểm chưa chắc chắn</p>
       <div className="mt-3 space-y-3">
         {items.length ? (
           items.map((item) => (
             <article className="rounded-[16px] border border-[var(--color-brand-input-border)] p-4" key={item.title.en}>
-              <p className="text-sm font-semibold text-[var(--color-brand-text-primary)]">{item.title.en}</p>
-              <p className="mt-1 text-sm text-[var(--color-brand-text-muted)]">{item.title.vi}</p>
-              <p className="mt-3 text-sm text-[var(--color-brand-text-body)]">{item.reason.en}</p>
-              <p className="mt-1 text-sm text-[var(--color-brand-text-muted)]">{item.reason.vi}</p>
+              <p className="text-sm font-semibold text-[var(--color-brand-text-primary)]">{item.title.vi}</p>
+              <p className="mt-1 text-sm text-[var(--color-brand-text-muted)]">{item.title.en}</p>
+              <p className="mt-3 text-sm text-[var(--color-brand-text-body)]">{item.reason.vi}</p>
+              <p className="mt-1 text-sm text-[var(--color-brand-text-muted)]">{item.reason.en}</p>
               <p className="mt-3 text-sm font-medium text-[var(--color-brand-text-primary)]">
-                Follow-up: {item.follow_up_suggestion.en}
+                Gợi ý follow-up: {item.follow_up_suggestion.vi}
               </p>
               <p className="mt-1 text-sm text-[var(--color-brand-text-muted)]">
-                {item.follow_up_suggestion.vi}
+                {item.follow_up_suggestion.en}
               </p>
             </article>
           ))
         ) : (
-          <EmptyValue text="No uncertainties" />
+          <EmptyValue text="Không có điểm chưa chắc chắn" />
         )}
       </div>
     </section>
