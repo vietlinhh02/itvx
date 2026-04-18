@@ -40,6 +40,7 @@ export function formatLabel(value: string | null | undefined) {
   const localizedMap: Record<string, string> = {
     continue: "Tiếp tục",
     adjust: "Điều chỉnh",
+    continue_with_hr_flag: "Tiếp tục, cần HR xem lại",
     ready_to_wrap: "Sẵn sàng kết thúc",
     escalate_hr: "Chuyển cho HR",
     not_started: "Chưa bắt đầu",
@@ -51,7 +52,7 @@ export function formatLabel(value: string | null | undefined) {
     idle: "Nhàn",
     review: "Cần xem lại",
     reject: "Từ chối",
-    advance: "Tiến tiếp",
+    advance: "Mời vào vòng tiếp theo",
     recovery: "Khôi phục",
     clarification: "Làm rõ",
     manual: "Thủ công",
