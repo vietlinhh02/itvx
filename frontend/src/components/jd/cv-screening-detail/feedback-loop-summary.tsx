@@ -20,6 +20,10 @@ function formatPercent(value: number | null | undefined) {
   return `${Math.round(value * 100)}%`
 }
 
+function buildScopedListKey(scope: string, value: string, index: number) {
+  return `${scope}-${index}-${value}`
+}
+
 export function FeedbackLoopSummary({
   interviewDetail,
   interviewFeedback,
@@ -113,15 +117,15 @@ export function FeedbackLoopSummary({
           <div className="mt-3 space-y-3 text-sm text-[var(--color-brand-text-body)]">
             {policySummary?.expected_effects?.length ? (
               <ul className="list-disc space-y-2 pl-5">
-                {policySummary.expected_effects.map((item) => (
-                  <li key={item}>{item}</li>
+                {policySummary.expected_effects.map((item, index) => (
+                  <li key={buildScopedListKey("expected-effect", item, index)}>{item}</li>
                 ))}
               </ul>
             ) : null}
             {planImpactSignals.length ? (
               <ul className="list-disc space-y-2 pl-5">
-                {planImpactSignals.slice(0, 3).map((item) => (
-                  <li key={`${item.competency}-${item.evidence}`}>
+                {planImpactSignals.slice(0, 3).map((item, index) => (
+                  <li key={buildScopedListKey("plan-impact", `${item.competency}-${item.evidence}`, index)}>
                     {item.competency}: {item.evidence}
                   </li>
                 ))}

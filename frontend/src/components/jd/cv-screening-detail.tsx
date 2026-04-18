@@ -104,7 +104,7 @@ export function CVScreeningDetail({
         <p className="mt-3 text-sm text-[var(--color-brand-text-body)]">{activeTab.description}</p>
       </section>
 
-      <div key={activePhase} className="motion-safe:animate-[panel-enter_220ms_ease-out]">
+      <div key={activePhase} className="space-y-6 motion-safe:animate-[panel-enter_220ms_ease-out]">
         {activePhase === "overview" ? (
           <OverviewPhaseContent screening={screening} historyItems={historyItems} />
         ) : null}
