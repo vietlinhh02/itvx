@@ -259,7 +259,8 @@ def build_client(monkeypatch: MonkeyPatch) -> TestClient:
         yield object()
 
     monkeypatch.setattr(app.router, "lifespan_context", fake_lifespan)
-    app.dependency_overrides[get_db] = fake_db_session
+    app.dependency_overrides.clear()
+    monkeypatch.setitem(app.dependency_overrides, get_db, fake_db_session)
     return TestClient(app)
 
 
@@ -480,6 +481,19 @@ def test_company_document_upload_endpoint_accepts_pdf(monkeypatch: MonkeyPatch) 
 
     assert response.status_code == 202
     assert response.json()["document"]["file_name"] == "company.pdf"
+
+
+def test_company_document_upload_endpoint_rejects_overlong_filename(monkeypatch: MonkeyPatch) -> None:
+    stub_jd_service(monkeypatch)
+    client = build_client(monkeypatch)
+
+    response = client.post(
+        "/api/v1/jd/test-jd-id/company-documents",
+        files={"file": (f'{"a" * 256}.pdf', b"%PDF-1.7\ncompany", "application/pdf")},
+    )
+
+    assert response.status_code == 400
+    assert response.json() == {"detail": "File name exceeds length limit"}
 
 
 def test_company_document_list_endpoint_returns_items(monkeypatch: MonkeyPatch) -> None:
