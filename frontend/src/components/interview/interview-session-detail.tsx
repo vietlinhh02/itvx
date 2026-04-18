@@ -6,6 +6,7 @@ import { CollapsibleSection } from "@/components/interview/live-room/live-room-s
 import { formatLabel } from "@/components/interview/live-room/live-room-utils"
 import type { InterviewSessionDetailResponse } from "@/components/interview/interview-types"
 import { usePageScrollRestore } from "@/hooks/use-persisted-ui-state"
+import { resolveApiBaseUrl } from "@/lib/api"
 
 export function InterviewSessionDetail({
   initialSession,
@@ -20,6 +21,7 @@ export function InterviewSessionDetail({
   const [answerText, setAnswerText] = useState("")
   const [error, setError] = useState<string | null>(null)
   const [isSubmitting, setIsSubmitting] = useState(false)
+  const apiBaseUrl = resolveApiBaseUrl(backendBaseUrl)
   usePageScrollRestore(`interviewx:interview-session-detail:${initialSession.session_id}:scroll-y`)
 
   const planQuestions = session.plan?.questions ?? []
@@ -39,7 +41,7 @@ export function InterviewSessionDetail({
     setIsSubmitting(true)
     setError(null)
     try {
-      const response = await fetch(`${backendBaseUrl}/api/v1/interviews/${session.session_id}/answer`, {
+      const response = await fetch(`${apiBaseUrl}/interviews/${session.session_id}/answer`, {
         method: "POST",
         headers: {
           Authorization: `Bearer ${accessToken}`,
@@ -53,7 +55,7 @@ export function InterviewSessionDetail({
         return
       }
 
-      const detailResponse = await fetch(`${backendBaseUrl}/api/v1/interviews/${session.session_id}`, {
+      const detailResponse = await fetch(`${apiBaseUrl}/interviews/${session.session_id}`, {
         headers: { Authorization: `Bearer ${accessToken}` },
         cache: "no-store",
       })
