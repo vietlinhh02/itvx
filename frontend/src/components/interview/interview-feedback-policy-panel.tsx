@@ -11,6 +11,11 @@ import type {
 } from "@/components/interview/interview-types"
 import { EmptyValue, ReviewSection } from "@/components/jd/cv-screening-ui"
 import { CollapsibleSection } from "@/components/interview/live-room/live-room-shell-parts"
+import { resolveApiBaseUrl } from "@/lib/api"
+
+function buildScopedListKey(scope: string, value: string, index: number) {
+  return `${scope}-${index}-${value}`
+}
 
 function PolicyCard({
   title,
@@ -38,7 +43,9 @@ function PolicyCard({
               <p className="text-xs font-semibold text-[var(--color-brand-text-muted)]">Năng lực bị AI đánh giá quá cao</p>
               <ul className="mt-2 space-y-1 text-sm text-[var(--color-brand-text-body)]">
                 {policy.summary_payload.top_overrated_competencies.length ? (
-                  policy.summary_payload.top_overrated_competencies.map((item) => <li key={item}>{item}</li>)
+                  policy.summary_payload.top_overrated_competencies.map((item, index) => (
+                    <li key={buildScopedListKey("overrated-competency", item, index)}>{item}</li>
+                  ))
                 ) : (
                   <li>Không có</li>
                 )}
@@ -48,7 +55,9 @@ function PolicyCard({
               <p className="text-xs font-semibold text-[var(--color-brand-text-muted)]">Tác động kỳ vọng</p>
               <ul className="mt-2 space-y-1 text-sm text-[var(--color-brand-text-body)]">
                 {policy.summary_payload.expected_effects.length ? (
-                  policy.summary_payload.expected_effects.map((item) => <li key={item}>{item}</li>)
+                  policy.summary_payload.expected_effects.map((item, index) => (
+                    <li key={buildScopedListKey("expected-effect", item, index)}>{item}</li>
+                  ))
                 ) : (
                   <li>Không có</li>
                 )}
@@ -62,6 +71,10 @@ function PolicyCard({
               <p>Ngưỡng bằng chứng mạnh: {policy.policy_payload.global_thresholds.strong_evidence_threshold}</p>
               <p>Độ tin cậy khi chốt: {policy.policy_payload.global_thresholds.wrap_up_confidence_threshold}</p>
               <p>Số lần điều chỉnh trước khi nâng cấp cho HR: {policy.policy_payload.global_thresholds.escalate_after_consecutive_adjustments}</p>
+              <p>Số lượt làm rõ tối đa cho mỗi competency trước khi chuyển chủ đề: {policy.policy_payload.global_thresholds.max_clarification_turns_per_competency}</p>
+              <p>Ngưỡng tin cậy semantic mặc định: {policy.policy_payload.global_thresholds.semantic_default_confidence_threshold}</p>
+              <p>Ngưỡng tin cậy semantic để move on: {policy.policy_payload.global_thresholds.semantic_move_on_confidence_threshold}</p>
+              <p>Ngưỡng tin cậy semantic để recovery: {policy.policy_payload.global_thresholds.semantic_recovery_confidence_threshold}</p>
             </div>
           </div>
         </div>
@@ -129,13 +142,14 @@ export function InterviewFeedbackPolicyPanel({
   initialData: InterviewFeedbackPolicyCollectionResponse | null
   interviewDetail?: InterviewSessionDetailResponse | null
 }) {
+  const apiBaseUrl = resolveApiBaseUrl(backendBaseUrl)
   const [data, setData] = useState(initialData)
   const [error, setError] = useState<string | null>(null)
   const [success, setSuccess] = useState<string | null>(null)
   const [isLoading, setIsLoading] = useState(false)
 
   async function refreshPolicies() {
-    const response = await fetch(`${backendBaseUrl}/api/v1/interviews/jd/${jdId}/feedback-policy`, {
+    const response = await fetch(`${apiBaseUrl}/interviews/jd/${jdId}/feedback-policy`, {
       headers: {
         Authorization: `Bearer ${accessToken}`,
       },
@@ -152,7 +166,7 @@ export function InterviewFeedbackPolicyPanel({
     setError(null)
     setSuccess(null)
     try {
-      const response = await fetch(`${backendBaseUrl}/api/v1/interviews/jd/${jdId}/feedback-policy/suggest`, {
+      const response = await fetch(`${apiBaseUrl}/interviews/jd/${jdId}/feedback-policy/suggest`, {
         method: "POST",
         headers: {
           Authorization: `Bearer ${accessToken}`,
@@ -185,15 +199,12 @@ export function InterviewFeedbackPolicyPanel({
     setError(null)
     setSuccess(null)
     try {
-      const response = await fetch(
-        `${backendBaseUrl}/api/v1/interviews/jd/${jdId}/feedback-policy/${policyId}/${action}`,
-        {
-          method: "POST",
-          headers: {
-            Authorization: `Bearer ${accessToken}`,
-          },
+      const response = await fetch(`${apiBaseUrl}/interviews/jd/${jdId}/feedback-policy/${policyId}/${action}`, {
+        method: "POST",
+        headers: {
+          Authorization: `Bearer ${accessToken}`,
         },
-      )
+      })
       if (!response.ok) {
         const body = (await response.json().catch(() => null)) as { detail?: string } | null
         setError(body?.detail ?? `Không thể ${action} policy.`)
@@ -282,7 +293,7 @@ export function InterviewFeedbackPolicyPanel({
                 </article>
               ))
             ) : (
-              <EmptyValue text="Chưa có ngữ cảnh memory nào được truy xuất." />
+              <EmptyValue text="Memory context sẽ xuất hiện sau khi HR gửi feedback cho ít nhất một buổi phỏng vấn đã hoàn tất." />
             )}
           </div>
         </section>
