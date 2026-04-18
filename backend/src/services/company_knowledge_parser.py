@@ -2,6 +2,7 @@
 
 from dataclasses import dataclass
 from pathlib import Path
+import subprocess
 from xml.etree import ElementTree
 from zipfile import ZipFile
 
@@ -29,14 +30,31 @@ class CompanyKnowledgeParser:
         else:
             raise ValueError("Unsupported company document type")
 
-        return self._chunk_text(text)
+        normalized_text = self._normalize_text(text)
+        if not normalized_text:
+            raise ValueError("Unable to extract text from company document")
+
+        return self._chunk_text(normalized_text)
 
     def _parse_pdf(self, file_path: Path) -> str:
-        """Extract naive text from a PDF without extra dependencies."""
-        file_bytes = file_path.read_bytes()
-        text = file_bytes.decode("latin-1", errors="ignore")
-        normalized = text.replace("\x00", " ")
-        return "\n".join(line.strip() for line in normalized.splitlines() if line.strip())
+        """Extract text from a PDF using pdftotext to avoid indexing raw PDF objects."""
+        try:
+            result = subprocess.run(
+                ["pdftotext", str(file_path), "-"],
+                capture_output=True,
+                check=True,
+                text=True,
+            )
+        except FileNotFoundError as exc:
+            raise RuntimeError("pdftotext is required to parse PDF company documents") from exc
+        except subprocess.CalledProcessError as exc:
+            error_message = (exc.stderr or "").strip() or "pdftotext failed"
+            raise ValueError(f"Unable to extract text from PDF: {error_message}") from exc
+
+        extracted_text = self._normalize_text(result.stdout)
+        if not extracted_text:
+            raise ValueError("Unable to extract text from PDF")
+        return extracted_text
 
     def _parse_docx(self, file_path: Path) -> str:
         """Extract paragraph text from a DOCX archive."""
@@ -51,6 +69,11 @@ class CompanyKnowledgeParser:
             if merged:
                 paragraphs.append(merged)
         return "\n".join(paragraphs)
+
+    def _normalize_text(self, text: str) -> str:
+        """Collapse parser output into clean non-empty lines."""
+        normalized = text.replace("\x00", " ")
+        return "\n".join(line.strip() for line in normalized.splitlines() if line.strip())
 
     def _chunk_text(self, text: str) -> list[ParsedCompanyChunk]:
         """Split extracted text into section-aware chunks."""
