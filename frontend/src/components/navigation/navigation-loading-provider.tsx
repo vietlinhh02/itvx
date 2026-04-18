@@ -2,7 +2,7 @@
 
 import { createContext, useContext, useEffect, useMemo, useRef, useState } from "react"
 
-import { usePathname, useSearchParams } from "next/navigation"
+import { usePathname } from "next/navigation"
 
 import { LoadingScreen } from "@/components/navigation/loading-screen"
 
@@ -15,9 +15,7 @@ const NavigationLoadingContext = createContext<NavigationLoadingContextValue | n
 
 export function NavigationLoadingProvider({ children }: { children: React.ReactNode }) {
   const pathname = usePathname()
-  const searchParams = useSearchParams()
   const [isLoading, setIsLoading] = useState(false)
-  const routeKey = `${pathname}?${searchParams.toString()}`
   const hasMounted = useRef(false)
 
   useEffect(() => {
@@ -31,7 +29,7 @@ export function NavigationLoadingProvider({ children }: { children: React.ReactN
     })
 
     return () => window.cancelAnimationFrame(timer)
-  }, [routeKey])
+  }, [pathname])
 
   const value = useMemo<NavigationLoadingContextValue>(
     () => ({

@@ -2,6 +2,7 @@
 
 import Link from "next/link"
 import type { ComponentProps } from "react"
+import { usePathname } from "next/navigation"
 
 import { useNavigationLoading } from "@/components/navigation/navigation-loading-provider"
 
@@ -9,6 +10,8 @@ type AppLinkProps = ComponentProps<typeof Link>
 
 export function AppLink({ onClick, href, ...props }: AppLinkProps) {
   const { startLoading } = useNavigationLoading()
+  const pathname = usePathname()
+  const currentPathname = pathname ?? ""
 
   return (
     <Link
@@ -28,8 +31,22 @@ export function AppLink({ onClick, href, ...props }: AppLinkProps) {
           return
         }
 
+        if (isCurrentRoute(href, currentPathname)) {
+          return
+        }
+
         startLoading()
       }}
     />
   )
+}
+
+function isCurrentRoute(href: AppLinkProps["href"], currentPathname: string) {
+  if (typeof href !== "string") {
+    return false
+  }
+
+  const target = new URL(href, "http://localhost")
+
+  return target.pathname === currentPathname
 }
