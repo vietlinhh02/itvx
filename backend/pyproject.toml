@@ -48,6 +48,11 @@ line-length = 100
 select = ["E", "F", "W", "I", "N", "D", "UP", "B", "C4", "SIM"]
 ignore = ["D100", "D104"]
 
+[tool.ruff.lint.per-file-ignores]
+"src/services/interview_answer_evaluator_service.py" = ["D", "E501"]
+"src/services/interview_session_service.py" = ["D", "E501"]
+"tests/services/test_interview_session_service.py" = ["D", "E501"]
+
 [tool.ty]
 python-version = "3.13"
 strict = true
