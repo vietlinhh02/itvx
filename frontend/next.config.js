@@ -3,6 +3,10 @@ const backendBaseUrl = process.env.API_URL ?? process.env.NEXT_PUBLIC_API_URL
 
 const nextConfig = {
   typedRoutes: true,
+  experimental: {
+    // Match the backend company document upload limit so rewrite proxying does not truncate uploads.
+    proxyClientMaxBodySize: 52_428_800,
+  },
   images: {
     remotePatterns: [
       {
