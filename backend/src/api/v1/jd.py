@@ -1,6 +1,7 @@
 """JD analysis API routes."""
 
 from io import BytesIO
+from pathlib import Path
 from typing import Annotated
 from zipfile import BadZipFile, ZipFile
 
@@ -28,6 +29,7 @@ SUPPORTED_MIME_TYPES = {
     "application/pdf",
     "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
 }
+MAX_UPLOAD_FILE_NAME_LENGTH = 255
 
 
 def _matches_pdf_signature(file_bytes: bytes) -> bool:
@@ -53,6 +55,14 @@ def _validate_file_content(mime_type: str, file_bytes: bytes) -> bool:
     return _matches_docx_structure(file_bytes)
 
 
+def _resolve_upload_file_name(upload_name: str | None, default_name: str) -> str:
+    """Return a normalized client file name safe for persistence."""
+    resolved_name = Path(upload_name or default_name).name or default_name
+    if len(resolved_name) > MAX_UPLOAD_FILE_NAME_LENGTH:
+        raise HTTPException(status_code=400, detail="File name exceeds length limit")
+    return resolved_name
+
+
 @router.get("", response_model=list[JDRecentItem])
 async def list_recent_jd_analyses(
     db: Annotated[AsyncSession, Depends(get_db)],
@@ -68,6 +78,7 @@ async def analyze_jd(
     db: Annotated[AsyncSession, Depends(get_db)],
 ) -> JDAnalysisEnqueueResponse:
     """Upload a JD file, validate it, and return the extracted analysis."""
+    upload_file_name = _resolve_upload_file_name(file.filename, "uploaded.jd")
     if file.content_type not in SUPPORTED_MIME_TYPES:
         raise HTTPException(status_code=400, detail="Unsupported file type")
 
@@ -81,7 +92,7 @@ async def analyze_jd(
 
     service = JDAnalysisService(upload_dir=settings.jd_upload_path, db_session=db)
     return await service.enqueue_analysis_upload(
-        file_name=file.filename or "uploaded.jd",
+        file_name=upload_file_name,
         mime_type=file.content_type,
         file_bytes=file_bytes,
     )
@@ -107,6 +118,7 @@ async def upload_company_document(
     db: Annotated[AsyncSession, Depends(get_db)],
 ) -> JDCompanyDocumentUploadResponse:
     """Upload one JD-scoped company knowledge document and enqueue ingestion."""
+    upload_file_name = _resolve_upload_file_name(file.filename, "uploaded-company-doc")
     if file.content_type not in SUPPORTED_MIME_TYPES:
         raise HTTPException(status_code=400, detail="Unsupported file type")
 
@@ -122,7 +134,7 @@ async def upload_company_document(
     try:
         return await service.upload_document(
             jd_id=jd_id,
-            file_name=file.filename or "uploaded-company-doc",
+            file_name=upload_file_name,
             mime_type=file.content_type,
             file_bytes=file_bytes,
         )
