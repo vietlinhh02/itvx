@@ -13,8 +13,11 @@ export function CVScreeningFollowups({
     >
       <div className="space-y-3">
         {items.length ? (
-          items.map((item) => (
-            <article className="rounded-[16px] border border-[var(--color-brand-input-border)] p-4" key={item.question.en}>
+          items.map((item, index) => (
+            <article
+              className="rounded-[16px] border border-[var(--color-brand-input-border)] p-4"
+              key={`${item.question.en}-${index}`}
+            >
               <p className="text-sm font-semibold text-[var(--color-brand-text-primary)]">{item.question.vi}</p>
               <p className="mt-1 text-sm text-[var(--color-brand-text-muted)]">{item.question.en}</p>
               <p className="mt-3 text-sm text-[var(--color-brand-text-body)]">{item.purpose.vi}</p>
