@@ -2,19 +2,54 @@
 
 import { useEffect, useMemo, useState } from "react"
 
+import Link from "next/link"
+
 import { LiveRoom } from "@/components/interview/live-room"
 import { InterviewSchedulePicker } from "@/components/interview/interview-schedule-picker"
 import type {
   CandidateJoinRequest,
+  CandidateJoinPreviewResponse,
   CandidateJoinResponse,
   InterviewSessionDetailResponse,
   ProposeInterviewScheduleRequest,
 } from "@/components/interview/interview-types"
+import { resolveApiBaseUrl } from "@/lib/api"
 import { APP_TIME_ZONE, formatVietnamDateTime, vietnamInputValueToIso } from "@/lib/datetime"
 
 type PersistedJoinState = {
   candidateName: string
-  joinPayload: CandidateJoinResponse | null
+}
+
+function InterviewEndedDialog() {
+  return (
+    <div className="fixed inset-0 z-50 flex items-center justify-center bg-slate-950/45 px-4">
+      <section
+        role="dialog"
+        aria-modal="true"
+        aria-labelledby="interview-ended-title"
+        className="w-full max-w-lg rounded-[28px] bg-white p-8 shadow-[0px_24px_80px_0px_rgba(15,79,87,0.18)]"
+      >
+        <p className="text-sm font-medium text-[var(--color-brand-text-muted)]">Phỏng vấn</p>
+        <h1 id="interview-ended-title" className="mt-2 text-3xl font-semibold text-[var(--color-brand-text-primary)]">
+          Buổi phỏng vấn đã kết thúc
+        </h1>
+        <p className="mt-4 text-base leading-7 text-[var(--color-brand-text-body)]">
+          Cảm ơn bạn đã dành thời gian tham gia buổi phỏng vấn.
+        </p>
+        <p className="mt-3 text-sm leading-6 text-[var(--color-brand-text-body)]">
+          Link phỏng vấn này đã hết hiệu lực và không thể dùng để vào lại phòng.
+        </p>
+        <div className="mt-6">
+          <Link
+            href="/"
+            className="inline-flex min-h-12 items-center justify-center rounded-full bg-[var(--color-brand-primary)] px-5 py-3 text-sm font-semibold text-white"
+          >
+            Quay về trang chủ
+          </Link>
+        </div>
+      </section>
+    </div>
+  )
 }
 
 function formatSchedule(value: string | null | undefined) {
@@ -27,7 +62,9 @@ function formatSchedule(value: string | null | undefined) {
 
 export function CandidateJoin({ token, backendBaseUrl }: { token: string; backendBaseUrl: string }) {
   const [joinPayload, setJoinPayload] = useState<CandidateJoinResponse | null>(null)
+  const [joinPreview, setJoinPreview] = useState<CandidateJoinPreviewResponse | null>(null)
   const [sessionDetail, setSessionDetail] = useState<InterviewSessionDetailResponse | null>(null)
+  const [isLinkExpired, setIsLinkExpired] = useState(false)
   const [isJoining, setIsJoining] = useState(false)
   const [isScheduling, setIsScheduling] = useState(false)
   const [candidateName, setCandidateName] = useState("")
@@ -35,6 +72,15 @@ export function CandidateJoin({ token, backendBaseUrl }: { token: string; backen
   const [proposedNote, setProposedNote] = useState("")
   const [error, setError] = useState<string | null>(null)
   const storageKey = useMemo(() => `interviewx:candidate-join:${token}`, [token])
+  const apiBaseUrl = useMemo(() => resolveApiBaseUrl(backendBaseUrl), [backendBaseUrl])
+
+  function markLinkExpired() {
+    setIsLinkExpired(true)
+    setError(null)
+    setJoinPayload(null)
+    setJoinPreview(null)
+    setSessionDetail(null)
+  }
 
   useEffect(() => {
     const raw = window.sessionStorage.getItem(storageKey)
@@ -45,9 +91,7 @@ export function CandidateJoin({ token, backendBaseUrl }: { token: string; backen
     try {
       const persisted = JSON.parse(raw) as PersistedJoinState
       setCandidateName(persisted.candidateName ?? "")
-      setJoinPayload(persisted.joinPayload ?? null)
-    } catch (storageError) {
-      console.warn("[CandidateJoin] could not restore persisted join state", storageError)
+    } catch {
       window.sessionStorage.removeItem(storageKey)
     }
   }, [storageKey])
@@ -55,35 +99,80 @@ export function CandidateJoin({ token, backendBaseUrl }: { token: string; backen
   useEffect(() => {
     const persistedState: PersistedJoinState = {
       candidateName,
-      joinPayload,
     }
     window.sessionStorage.setItem(storageKey, JSON.stringify(persistedState))
-  }, [candidateName, joinPayload, storageKey])
+  }, [candidateName, storageKey])
+
+  useEffect(() => {
+    let isDisposed = false
+
+    async function loadJoinPreview() {
+      try {
+        const response = await fetch(`${apiBaseUrl}/interviews/join/${token}`, {
+          cache: "no-store",
+        })
+        if (response.status === 404) {
+          if (!isDisposed) {
+            markLinkExpired()
+          }
+          return
+        }
+        if (!response.ok || isDisposed) {
+          return
+        }
+
+        const preview = (await response.json()) as CandidateJoinPreviewResponse
+        if (!isDisposed) {
+          setJoinPreview(preview)
+        }
+      } catch {
+        // Preview is non-blocking for candidate entry.
+      }
+    }
+
+    void loadJoinPreview()
+
+    return () => {
+      isDisposed = true
+    }
+  }, [apiBaseUrl, token])
 
   useEffect(() => {
     if (!joinPayload) {
       return
     }
 
-    console.info("[CandidateJoin] start polling session detail", {
-      backendBaseUrl,
-      sessionId: joinPayload.session_id,
-      roomName: joinPayload.room_name,
-    })
+    const sessionId = joinPayload.session_id
+    let isDisposed = false
 
-    const timer = window.setInterval(async () => {
-      const response = await fetch(`${backendBaseUrl}/api/v1/interviews/sessions/${joinPayload.session_id}`, {
-        cache: "no-store",
-      })
-      if (response.ok) {
+    async function pollSessionDetail() {
+      try {
+        const response = await fetch(`${apiBaseUrl}/interviews/sessions/${sessionId}`, {
+          cache: "no-store",
+        })
+        if (!response.ok || isDisposed) {
+          return
+        }
+
         const detail = (await response.json()) as InterviewSessionDetailResponse
-        console.info("[CandidateJoin] polled session detail", detail)
-        setSessionDetail(detail)
+        if (!isDisposed) {
+          setSessionDetail(detail)
+        }
+      } catch {
+        // Polling can fail transiently during room setup; keep the UI stable.
       }
+    }
+
+    void pollSessionDetail()
+    const timer = window.setInterval(() => {
+      void pollSessionDetail()
     }, 3000)
 
-    return () => window.clearInterval(timer)
-  }, [backendBaseUrl, joinPayload])
+    return () => {
+      isDisposed = true
+      window.clearInterval(timer)
+    }
+  }, [apiBaseUrl, joinPayload])
 
   async function handleProposeSchedule() {
     if (!proposedStartAt) {
@@ -94,7 +183,7 @@ export function CandidateJoin({ token, backendBaseUrl }: { token: string; backen
     setIsScheduling(true)
     setError(null)
     try {
-      const response = await fetch(`${backendBaseUrl}/api/v1/interviews/join/${token}/schedule`, {
+      const response = await fetch(`${apiBaseUrl}/interviews/join/${token}/schedule`, {
         method: "POST",
         headers: {
           "Content-Type": "application/json",
@@ -106,9 +195,23 @@ export function CandidateJoin({ token, backendBaseUrl }: { token: string; backen
           timezone: APP_TIME_ZONE,
         } satisfies ProposeInterviewScheduleRequest),
       })
+      if (response.status === 404) {
+        markLinkExpired()
+        return
+      }
       if (!response.ok) {
         setError("Không thể gửi đề xuất thời gian khác.")
+        return
       }
+      const schedule = (await response.json()) as CandidateJoinPreviewResponse["schedule"]
+      setJoinPreview((current) =>
+        current
+          ? {
+              ...current,
+              schedule,
+            }
+          : current,
+      )
     } catch {
       setError("Không thể kết nối tới dịch vụ phỏng vấn.")
     } finally {
@@ -126,12 +229,7 @@ export function CandidateJoin({ token, backendBaseUrl }: { token: string; backen
     setIsJoining(true)
     setError(null)
     try {
-      console.info("[CandidateJoin] requesting join token", {
-        backendBaseUrl,
-        token,
-        candidateName: trimmedName,
-      })
-      const response = await fetch(`${backendBaseUrl}/api/v1/interviews/join/${token}`, {
+      const response = await fetch(`${apiBaseUrl}/interviews/join/${token}`, {
         method: "POST",
         headers: {
           "Content-Type": "application/json",
@@ -139,19 +237,17 @@ export function CandidateJoin({ token, backendBaseUrl }: { token: string; backen
         cache: "no-store",
         body: JSON.stringify({ candidate_name: trimmedName } satisfies CandidateJoinRequest),
       })
+      if (response.status === 404) {
+        markLinkExpired()
+        return
+      }
       if (!response.ok) {
-        console.error("[CandidateJoin] join request failed", {
-          status: response.status,
-          statusText: response.statusText,
-        })
         setError("Không thể tham gia buổi phỏng vấn này.")
         return
       }
       const payload = (await response.json()) as CandidateJoinResponse
-      console.info("[CandidateJoin] received join payload", payload)
       setJoinPayload(payload)
-    } catch (joinError) {
-      console.error("[CandidateJoin] join request threw", joinError)
+    } catch {
       setError("Không thể kết nối tới dịch vụ phỏng vấn.")
     } finally {
       setIsJoining(false)
@@ -169,7 +265,12 @@ export function CandidateJoin({ token, backendBaseUrl }: { token: string; backen
     )
   }
 
-  const scheduledStartAt = sessionDetail?.schedule?.scheduled_start_at ?? null
+  if (isLinkExpired) {
+    return <InterviewEndedDialog />
+  }
+
+  const scheduledStartAt =
+    joinPreview?.schedule?.scheduled_start_at ?? sessionDetail?.schedule?.scheduled_start_at ?? null
 
   return (
     <section className="flex min-h-[calc(100vh-8rem)] items-center">
