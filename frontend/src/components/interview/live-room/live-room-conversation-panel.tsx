@@ -6,6 +6,63 @@ import {
 } from "@/components/interview/live-room/live-room-shell-parts"
 import { formatLabel } from "@/components/interview/live-room/live-room-utils"
 
+function formatRelativeUpdate(value: string | null | undefined) {
+  if (!value) {
+    return "Chưa có cập nhật"
+  }
+
+  const parsed = new Date(value)
+  if (Number.isNaN(parsed.getTime())) {
+    return "Chưa có cập nhật"
+  }
+
+  return new Intl.DateTimeFormat("vi-VN", {
+    day: "2-digit",
+    month: "2-digit",
+    hour: "2-digit",
+    minute: "2-digit",
+  }).format(parsed)
+}
+
+function getCompetencyLaneLabel(index: number, currentCompetencyIndex: number, status: string | null | undefined) {
+  if (status === "covered") {
+    return "Hoàn tất"
+  }
+
+  if (status === "in_progress" || status === "needs_recovery" || index === currentCompetencyIndex) {
+    return "Đang theo dõi"
+  }
+
+  if (status === "not_started" && index > currentCompetencyIndex) {
+    return "Chờ đến lượt"
+  }
+
+  return formatLabel(status ?? "not_started")
+}
+
+function getDisplayedCompetencyIndex(sessionDetail?: InterviewSessionDetailResponse | null) {
+  const fallbackIndex = sessionDetail?.plan?.current_competency_index ?? 0
+  const questions = sessionDetail?.plan?.questions ?? []
+  const competencies = sessionDetail?.plan?.competencies ?? []
+  const activeQuestion = questions[sessionDetail?.current_question_index ?? 0]
+
+  if (!activeQuestion || !competencies.length) {
+    return fallbackIndex
+  }
+
+  const targetName = (
+    activeQuestion.target_competency?.en ??
+    activeQuestion.dimension_name.en
+  ).trim().toLowerCase()
+
+  if (!targetName) {
+    return fallbackIndex
+  }
+
+  const matchedIndex = competencies.findIndex((competency) => competency.name.en.trim().toLowerCase() === targetName)
+  return matchedIndex >= 0 ? matchedIndex : fallbackIndex
+}
+
 export function ConversationPanel({ sessionDetail }: { sessionDetail?: InterviewSessionDetailResponse | null }) {
   const turns = sessionDetail?.transcript_turns ?? []
   const questions = sessionDetail?.plan?.questions ?? []
@@ -15,10 +72,13 @@ export function ConversationPanel({ sessionDetail }: { sessionDetail?: Interview
   const nextIntendedStep = sessionDetail?.plan?.next_intended_step?.vi ?? sessionDetail?.plan?.next_intended_step?.en ?? null
   const decisionStatus = sessionDetail?.plan?.interview_decision_status ?? "continue"
   const currentQuestionIndex = sessionDetail?.current_question_index ?? 0
+  const currentCompetencyIndex = getDisplayedCompetencyIndex(sessionDetail)
   const upcomingQuestions = questions.slice(currentQuestionIndex, currentQuestionIndex + 3)
   const planningRuntimeEvents = (sessionDetail?.runtime_events ?? []).filter((event) =>
     event.event_type.startsWith("planning."),
   )
+  const recentPlanEvents = planEvents.slice(-3).reverse()
+  const recentPlanningRuntimeEvents = planningRuntimeEvents.slice(-3).reverse()
 
   return (
     <section className="rounded-[24px] bg-white p-6 shadow-[0px_10px_30px_0px_rgba(15,79,87,0.06)]">
@@ -94,24 +154,67 @@ export function ConversationPanel({ sessionDetail }: { sessionDetail?: Interview
           {competencies.length ? (
             <CollapsibleSection title="Tiến độ bao phủ">
               <div className="space-y-3">
-                {competencies.slice(0, 3).map((competency) => (
+                {competencies.map((competency, index) => {
+                  const laneLabel = getCompetencyLaneLabel(index, currentCompetencyIndex, competency.status)
+                  const isActive = laneLabel === "Đang theo dõi"
+                  const isQueued = laneLabel === "Chờ đến lượt"
+                  const isCompleted = laneLabel === "Hoàn tất"
+
+                  return (
                   <article
                     key={`${competency.name.en}-${competency.priority}`}
-                    className="rounded-[14px] bg-[var(--color-primary-50)]/50 p-3"
+                    className={`rounded-[16px] border p-4 ${
+                      isActive
+                        ? "border-[var(--color-brand-primary)] bg-[var(--color-primary-50)]/70"
+                        : isCompleted
+                          ? "border-emerald-200 bg-emerald-50/70"
+                          : "border-[var(--color-brand-input-border)] bg-[var(--color-primary-50)]/40"
+                    }`}
                   >
-                    <div className="flex items-center justify-between gap-3">
-                      <p className="text-sm font-semibold text-[var(--color-brand-text-primary)]">
-                        {competency.name.vi || competency.name.en}
-                      </p>
-                      <span className="text-xs text-[var(--color-brand-text-muted)]">
-                        {formatLabel(competency.status ?? "not_started")}
+                    <div className="flex flex-wrap items-start justify-between gap-3">
+                      <div className="min-w-0">
+                        <p className="text-sm font-semibold text-[var(--color-brand-text-primary)]">
+                          {competency.name.vi || competency.name.en}
+                        </p>
+                        <p className="mt-1 text-xs text-[var(--color-brand-text-muted)]">
+                          Ưu tiên {competency.priority} · Mục tiêu {competency.target_question_count} câu ·{" "}
+                          {formatLabel(competency.status ?? "not_started")}
+                        </p>
+                      </div>
+                      <span
+                        className={`rounded-full px-3 py-1 text-xs font-semibold ${
+                          isActive
+                            ? "bg-[var(--color-brand-primary)] text-white"
+                            : isQueued
+                              ? "bg-white text-[var(--color-brand-primary)]"
+                              : isCompleted
+                                ? "bg-emerald-100 text-emerald-700"
+                                : "bg-white text-[var(--color-brand-text-muted)]"
+                        }`}
+                      >
+                        {laneLabel}
                       </span>
                     </div>
                     <div className="mt-3">
                       <CoverageBar value={competency.current_coverage} />
                     </div>
+                    <div className="mt-3 grid gap-2 text-xs text-[var(--color-brand-text-muted)] sm:grid-cols-2">
+                      <p>Số bằng chứng: {competency.evidence_collected_count ?? 0}</p>
+                      <p className="sm:text-right">Cập nhật: {formatRelativeUpdate(competency.last_updated_at)}</p>
+                    </div>
+                    {competency.evidence_needed.length ? (
+                      <p className="mt-2 text-sm text-[var(--color-brand-text-body)]">
+                        Cần thêm: {competency.evidence_needed[0]?.vi || competency.evidence_needed[0]?.en}
+                      </p>
+                    ) : null}
+                    {competency.stop_condition ? (
+                      <p className="mt-1 text-sm text-[var(--color-brand-text-body)]">
+                        Điều kiện dừng: {competency.stop_condition.vi || competency.stop_condition.en}
+                      </p>
+                    ) : null}
                   </article>
-                ))}
+                  )
+                })}
               </div>
             </CollapsibleSection>
           ) : null}
@@ -141,65 +244,92 @@ export function ConversationPanel({ sessionDetail }: { sessionDetail?: Interview
             </CollapsibleSection>
           ) : null}
 
-          {planEvents.length || planningRuntimeEvents.length ? (
+          {sessionDetail?.plan ? (
             <CollapsibleSection title="Sự kiện từ agent và hệ thống">
-              <div className="grid gap-4 lg:grid-cols-2">
-                <div className="space-y-3">
-                  <p className="text-sm font-semibold text-[var(--color-brand-text-primary)]">Quyết định của agent</p>
-                  {planEvents.slice(-3).map((event, index) => (
-                    <article
-                      key={`${event.event_type}-${event.created_at}-${index}`}
-                      className="rounded-[14px] bg-[var(--color-primary-50)]/50 p-3"
-                    >
-                      <p className="text-sm font-semibold text-[var(--color-brand-text-primary)]">
-                        {formatLabel(event.event_type)}
-                      </p>
-                      <p className="mt-1 text-sm text-[var(--color-brand-text-body)]">
-                        {event.reason.vi || event.reason.en}
-                      </p>
-                      <p className="mt-1 text-xs text-[var(--color-brand-text-muted)]">
-                        Hành động: {formatLabel(event.chosen_action)}
-                        {event.confidence != null ? ` · Độ tin cậy ${Math.round(event.confidence * 100)}%` : ""}
-                      </p>
-                      {event.decision_rule ? (
-                        <p className="mt-1 text-xs text-[var(--color-brand-text-muted)]">
-                          Luật: {formatLabel(event.decision_rule)}
-                        </p>
-                      ) : null}
-                      {event.next_question_type ? (
-                        <p className="mt-1 text-xs text-[var(--color-brand-text-muted)]">
-                          Loại câu hỏi tiếp theo: {formatLabel(event.next_question_type)}
-                        </p>
-                      ) : null}
-                      {event.evidence_excerpt ? (
-                        <p className="mt-1 text-sm text-[var(--color-brand-text-body)]">
-                          Bằng chứng: {event.evidence_excerpt.vi || event.evidence_excerpt.en}
-                        </p>
-                      ) : null}
-                    </article>
-                  ))}
-                </div>
-                <div className="space-y-3">
-                  <p className="text-sm font-semibold text-[var(--color-brand-text-primary)]">Sự kiện hệ thống</p>
-                  {planningRuntimeEvents.slice(-3).map((event, index) => (
-                    <article
-                      key={`${event.event_type}-${index}`}
-                      className="rounded-[14px] bg-[var(--color-primary-50)]/50 p-3"
-                    >
-                      <p className="text-sm font-semibold text-[var(--color-brand-text-primary)]">
-                        {formatLabel(event.event_type)}
-                      </p>
-                      <p className="mt-1 text-sm text-[var(--color-brand-text-body)]">
-                        Giai đoạn hiện tại: {formatLabel(String(event.payload.current_phase ?? "planned"))}
-                      </p>
-                      <p className="mt-1 text-xs text-[var(--color-brand-text-muted)]">
-                        Phiên {formatLabel(event.session_status ?? "unknown")} · Worker{" "}
-                        {formatLabel(event.worker_status ?? "unknown")} · Provider{" "}
-                        {formatLabel(event.provider_status ?? "unknown")}
-                      </p>
-                    </article>
-                  ))}
-                </div>
+              <div className="grid gap-4 xl:grid-cols-2">
+                <section className="flex h-full flex-col rounded-[16px] border border-[var(--color-brand-input-border)] bg-[var(--color-primary-50)]/35 p-4">
+                  <div className="flex items-center justify-between gap-3">
+                    <p className="text-sm font-semibold text-[var(--color-brand-text-primary)]">Quyết định của agent</p>
+                    <span className="rounded-full bg-white px-3 py-1 text-xs font-semibold text-[var(--color-brand-primary)]">
+                      {recentPlanEvents.length} mục
+                    </span>
+                  </div>
+                  <div className="mt-3 space-y-3">
+                    {recentPlanEvents.length ? (
+                      recentPlanEvents.map((event, index) => (
+                        <article
+                          key={`${event.event_type}-${event.created_at}-${index}`}
+                          className="rounded-[14px] border border-[var(--color-brand-input-border)] bg-white p-3"
+                        >
+                          <p className="text-sm font-semibold text-[var(--color-brand-text-primary)]">
+                            {formatLabel(event.event_type)}
+                          </p>
+                          <p className="mt-1 text-sm text-[var(--color-brand-text-body)]">
+                            {event.reason.vi || event.reason.en}
+                          </p>
+                          <p className="mt-1 text-xs text-[var(--color-brand-text-muted)]">
+                            Hành động: {formatLabel(event.chosen_action)}
+                            {event.confidence != null ? ` · Độ tin cậy ${Math.round(event.confidence * 100)}%` : ""}
+                          </p>
+                          {event.decision_rule ? (
+                            <p className="mt-1 text-xs text-[var(--color-brand-text-muted)]">
+                              Luật: {formatLabel(event.decision_rule)}
+                            </p>
+                          ) : null}
+                          {event.next_question_type ? (
+                            <p className="mt-1 text-xs text-[var(--color-brand-text-muted)]">
+                              Loại câu hỏi tiếp theo: {formatLabel(event.next_question_type)}
+                            </p>
+                          ) : null}
+                          {event.evidence_excerpt ? (
+                            <p className="mt-1 text-sm text-[var(--color-brand-text-body)]">
+                              Bằng chứng: {event.evidence_excerpt.vi || event.evidence_excerpt.en}
+                            </p>
+                          ) : null}
+                        </article>
+                      ))
+                    ) : (
+                      <div className="rounded-[14px] border border-dashed border-[var(--color-brand-input-border)] bg-white p-4 text-sm text-[var(--color-brand-text-muted)]">
+                        Chưa có quyết định mới từ agent.
+                      </div>
+                    )}
+                  </div>
+                </section>
+
+                <section className="flex h-full flex-col rounded-[16px] border border-[var(--color-brand-input-border)] bg-[var(--color-primary-50)]/35 p-4">
+                  <div className="flex items-center justify-between gap-3">
+                    <p className="text-sm font-semibold text-[var(--color-brand-text-primary)]">Sự kiện hệ thống</p>
+                    <span className="rounded-full bg-white px-3 py-1 text-xs font-semibold text-[var(--color-brand-primary)]">
+                      {recentPlanningRuntimeEvents.length} mục
+                    </span>
+                  </div>
+                  <div className="mt-3 space-y-3">
+                    {recentPlanningRuntimeEvents.length ? (
+                      recentPlanningRuntimeEvents.map((event, index) => (
+                        <article
+                          key={`${event.event_type}-${index}`}
+                          className="rounded-[14px] border border-[var(--color-brand-input-border)] bg-white p-3"
+                        >
+                          <p className="text-sm font-semibold text-[var(--color-brand-text-primary)]">
+                            {formatLabel(event.event_type)}
+                          </p>
+                          <p className="mt-1 text-sm text-[var(--color-brand-text-body)]">
+                            Giai đoạn hiện tại: {formatLabel(String(event.payload.current_phase ?? "planned"))}
+                          </p>
+                          <p className="mt-1 text-xs text-[var(--color-brand-text-muted)]">
+                            Phiên {formatLabel(event.session_status ?? "unknown")} · Worker{" "}
+                            {formatLabel(event.worker_status ?? "unknown")} · Provider{" "}
+                            {formatLabel(event.provider_status ?? "unknown")}
+                          </p>
+                        </article>
+                      ))
+                    ) : (
+                      <div className="rounded-[14px] border border-dashed border-[var(--color-brand-input-border)] bg-white p-4 text-sm text-[var(--color-brand-text-muted)]">
+                        Chưa có sự kiện hệ thống mới.
+                      </div>
+                    )}
+                  </div>
+                </section>
               </div>
             </CollapsibleSection>
           ) : null}
@@ -211,23 +341,28 @@ export function ConversationPanel({ sessionDetail }: { sessionDetail?: Interview
           {turns.length ? (
             turns.slice(-8).map((turn) => {
               const isCandidate = turn.speaker.toLowerCase().includes("candidate")
+              const isAgent = turn.speaker.toLowerCase().includes("agent")
 
               return (
                 <article
                   key={`${turn.speaker}-${turn.sequence_number}`}
                   className={`rounded-[16px] border p-4 ${
                     isCandidate
-                      ? "border-[var(--color-brand-primary)] bg-[var(--color-primary-50)]"
-                      : "border-[var(--color-brand-input-border)] bg-white"
+                      ? "ml-auto max-w-[88%] border-[var(--color-brand-primary)] bg-[var(--color-primary-50)]"
+                      : isAgent
+                        ? "mr-auto max-w-[88%] border-[var(--color-brand-input-border)] bg-slate-50"
+                        : "mr-auto max-w-[88%] border-[var(--color-brand-input-border)] bg-white"
                   }`}
                 >
                   <div className="flex items-center justify-between gap-3">
-                    <p className="text-xs font-semibold text-[var(--color-brand-text-muted)]">
+                    <p className="rounded-full bg-white px-3 py-1 text-xs font-semibold text-[var(--color-brand-text-muted)]">
                       {formatLabel(turn.speaker)}
                     </p>
                     <span className="text-xs text-[var(--color-brand-text-muted)]">#{turn.sequence_number}</span>
                   </div>
-                  <p className="mt-2 text-sm text-[var(--color-brand-text-body)]">{turn.transcript_text}</p>
+                  <p className="mt-3 whitespace-pre-wrap text-sm leading-6 text-[var(--color-brand-text-body)]">
+                    {turn.transcript_text}
+                  </p>
                 </article>
               )
             })
