@@ -46,7 +46,7 @@ export const phaseTabs: Array<{ key: PhaseKey; label: string; description: strin
   {
     key: "overview",
     label: "Giai đoạn 1 · Tổng quan",
-    description: "Tóm tắt, hồ sơ ứng viên và các lượt sàng lọc khác của JD này.",
+    description: "Tóm tắt kết quả, hồ sơ ứng viên và lịch sử sàng lọc của JD này.",
   },
   {
     key: "evaluation",
@@ -74,7 +74,7 @@ export function OverviewPhaseContent({ screening, historyItems }: Pick<PhaseCont
   return (
     <>
       <CVScreeningHistory
-        title="Các lượt sàng lọc khác của JD này"
+        title="Lịch sử sàng lọc của JD này"
         items={historyItems}
         currentScreeningId={screening.screening_id}
       />
@@ -123,7 +123,7 @@ export function InterviewPhaseContent({
   "screening" | "accessToken" | "backendBaseUrl" | "interviewDetail" | "interviewReview" | "companyDocuments"
 >) {
   return (
-    <>
+    <div className="space-y-6">
       <InterviewLaunchPanel
         screeningId={screening.screening_id}
         jdId={screening.jd_id}
@@ -131,6 +131,7 @@ export function InterviewPhaseContent({
         backendBaseUrl={backendBaseUrl}
         initialDraft={screening.interview_draft ?? null}
         initialCompanyDocuments={companyDocuments}
+        defaultCollapsed={interviewDetail?.status === "completed"}
       />
       {interviewDetail ? (
         <>
@@ -138,9 +139,15 @@ export function InterviewPhaseContent({
             status={interviewDetail.status}
             workerStatus={interviewDetail.worker_status}
             providerStatus={interviewDetail.provider_status}
+            lastErrorCode={interviewDetail.last_error_code}
+            lastErrorMessage={interviewDetail.last_error_message}
           />
           {interviewReview ? (
-            <TranscriptReview summary={interviewReview.summary_payload} turns={interviewReview.transcript_turns} />
+            <TranscriptReview
+              summary={interviewReview.summary_payload}
+              turns={interviewReview.transcript_turns}
+              aiCompetencyAssessments={interviewReview.ai_competency_assessments}
+            />
           ) : (
             <section className="rounded-[24px] bg-white p-6 shadow-[0px_10px_30px_0px_rgba(15,79,87,0.06)]">
               <h2 className="text-xl font-semibold text-[var(--color-brand-text-primary)]">Rà soát buổi phỏng vấn</h2>
@@ -156,7 +163,7 @@ export function InterviewPhaseContent({
           <p className="mt-2 text-sm text-[var(--color-brand-text-body)]">Chưa có phiên phỏng vấn nào được khởi tạo.</p>
         </section>
       )}
-    </>
+    </div>
   )
 }
 
@@ -210,12 +217,21 @@ export function FeedbackLoopPhaseContent({
           />
         </>
       ) : (
-        <section className="rounded-[24px] bg-white p-6 shadow-[0px_10px_30px_0px_rgba(15,79,87,0.06)]">
-          <h2 className="text-xl font-semibold text-[var(--color-brand-text-primary)]">Vòng phản hồi</h2>
-          <p className="mt-2 text-sm text-[var(--color-brand-text-body)]">
-            Hãy hoàn tất một buổi phỏng vấn trước để mở khóa phản hồi HR, analytics và tính năng tạo policy cho AI.
-          </p>
-        </section>
+        <>
+          <section className="rounded-[24px] bg-white p-6 shadow-[0px_10px_30px_0px_rgba(15,79,87,0.06)]">
+            <h2 className="text-xl font-semibold text-[var(--color-brand-text-primary)]">Vòng phản hồi</h2>
+            <p className="mt-2 text-sm text-[var(--color-brand-text-body)]">
+              Hãy hoàn tất một buổi phỏng vấn trước để mở khóa phản hồi HR và analytics của phiên.
+            </p>
+          </section>
+          <InterviewFeedbackPolicyPanel
+            jdId={screening.jd_id}
+            accessToken={accessToken}
+            backendBaseUrl={backendBaseUrl}
+            initialData={feedbackPolicy}
+            interviewDetail={interviewDetail}
+          />
+        </>
       )}
     </>
   )
