@@ -2,9 +2,11 @@ import { getServerSession } from "next-auth"
 import type { Route } from "next"
 import { redirect } from "next/navigation"
 
+import { DashboardSystemErrorState } from "@/components/dashboard/dashboard-system-error-state"
 import { JDUploadPanel } from "@/components/jd/jd-upload-panel"
 import { AppLink } from "@/components/navigation/app-link"
 import { authOptions } from "@/lib/auth-options"
+import { fetchDashboardJson } from "@/lib/dashboard-server"
 import { formatVietnamDateTime } from "@/lib/datetime"
 
 const backendBaseUrl = process.env.API_URL ?? process.env.NEXT_PUBLIC_API_URL
@@ -20,23 +22,40 @@ type JDRecentItem = {
 export default async function JDDashboardPage() {
   const session = await getServerSession(authOptions)
 
-  if (!session?.accessToken || !backendBaseUrl) {
+  if (!session?.accessToken) {
     redirect("/login")
   }
 
-  const recentResponse = await fetch(`${backendBaseUrl}/api/v1/jd`, {
-    method: "GET",
-    headers: {
-      Authorization: `Bearer ${session.accessToken}`,
-    },
-    cache: "no-store",
+  if (!backendBaseUrl) {
+    return (
+      <DashboardSystemErrorState
+        title="Không thể tải danh sách JD"
+        description="Ứng dụng chưa được cấu hình địa chỉ backend. Hãy kiểm tra API_URL hoặc NEXT_PUBLIC_API_URL."
+      />
+    )
+  }
+
+  const recentResult = await fetchDashboardJson<JDRecentItem[]>({
+    accessToken: session.accessToken,
+    resourceLabel: "recent JD uploads",
+    url: `${backendBaseUrl}/api/v1/jd`,
   })
 
-  if (!recentResponse.ok) {
+  if (recentResult.kind === "auth") {
     redirect("/login")
   }
 
-  const recentUploads = (await recentResponse.json()) as JDRecentItem[]
+  if (recentResult.kind !== "success") {
+    return (
+      <DashboardSystemErrorState
+        title="Không thể tải danh sách JD"
+        description="Backend đang lỗi hoặc không phản hồi khi tải danh sách JD gần đây."
+        status={recentResult.status}
+      />
+    )
+  }
+
+  const recentUploads = recentResult.kind === "success" ? recentResult.data : []
 
   return (
     <main className="flex w-full flex-col gap-6 py-6">
@@ -56,7 +75,7 @@ export default async function JDDashboardPage() {
 
           <div className="mt-5 flex flex-col gap-3">
             {recentUploads.length ? (
-              recentUploads.map((item) => (
+              recentUploads.map((item: JDRecentItem) => (
                 <AppLink
                   className="rounded-[18px] border border-[var(--color-brand-input-border)] p-4 transition duration-200 hover:-translate-y-0.5 hover:border-[var(--color-brand-primary)] hover:bg-[var(--color-primary-50)]"
                   href={buildJDRoute(item.jd_id)}

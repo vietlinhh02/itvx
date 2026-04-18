@@ -85,7 +85,7 @@ export default async function CVScreeningDetailPage({ params }: CVScreeningDetai
           </div>
           <div className="mt-6 rounded-[16px] border border-[var(--color-brand-input-border)] px-4 py-4">
             <p className="text-sm font-semibold text-[var(--color-brand-text-primary)]">
-              Trạng thái: {screening.status}
+              Trạng thái: {formatScreeningStatus(screening.status)}
             </p>
             <p className="mt-1 text-sm text-[var(--color-brand-text-body)]">
               Tạo lúc {formatVietnamDateTime(screening.created_at)}
@@ -185,4 +185,15 @@ export default async function CVScreeningDetailPage({ params }: CVScreeningDetai
 
 function buildJDRoute(jdId: string): Route {
   return `/dashboard/jd/${jdId}` as Route
+}
+
+function formatScreeningStatus(status: CVScreeningResponse["status"]) {
+  if (status === "completed") {
+    return "Hoàn tất"
+  }
+  if (status === "failed") {
+    return "Thất bại"
+  }
+
+  return "Đang xử lý"
 }

@@ -22,7 +22,7 @@ const RECOMMENDATION_STYLES: Record<string, string> = {
   advance:
     "bg-emerald-50 text-emerald-700",
   review:
-    "bg-amber-50 text-amber-700",
+    "bg-sky-50 text-sky-700",
   reject:
     "bg-rose-50 text-rose-700",
 }
@@ -57,7 +57,7 @@ export default async function CVScreeningsPage() {
             Sàng lọc CV
           </h2>
           <p className="mt-2 text-sm leading-6 text-[var(--color-brand-text-body)]">
-            Rà soát tất cả kết quả sàng lọc CV của ứng viên trên mọi JD.
+            Xem lại toàn bộ kết quả sàng lọc CV của ứng viên theo từng JD.
           </p>
         </div>
 
@@ -92,7 +92,7 @@ export default async function CVScreeningsPage() {
             ))
           ) : (
             <p className="col-span-full rounded-[14px] border border-dashed border-[var(--color-brand-input-border)] p-3 text-sm text-[var(--color-brand-text-muted)]">
-              Chưa có lượt sàng lọc CV nào. Hãy tải một CV từ trang chi tiết JD để tạo danh sách này.
+              Chưa có kết quả sàng lọc CV nào. Hãy tải CV từ trang chi tiết JD để bắt đầu.
             </p>
           )}
         </div>
