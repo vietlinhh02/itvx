@@ -1,7 +1,7 @@
 from contextlib import asynccontextmanager
 from importlib import import_module
 
-from fastapi import FastAPI
+from fastapi import FastAPI, HTTPException
 from fastapi.testclient import TestClient
 from pytest import MonkeyPatch
 
@@ -9,6 +9,7 @@ from src.database import get_db
 from src.main import app
 from src.models.user import User
 from src.schemas.interview import (
+    CandidateJoinPreviewResponse,
     CandidateJoinRequest,
     CandidateJoinResponse,
     CompleteInterviewRequest,
@@ -25,6 +26,7 @@ from src.schemas.interview import (
     InterviewSessionRuntimeStateResponse,
     PublishInterviewResponse,
     SuggestInterviewFeedbackPolicyResponse,
+    TranscriptTurnRequest,
 )
 from src.schemas.jd import BilingualText, JDCompanyKnowledgeQueryResponse
 
@@ -82,6 +84,21 @@ class FakeInterviewSessionService:
             participant_token="token-1",
             candidate_identity="candidate-session-1",
             schedule=InterviewSchedulePayload(),
+        )
+
+    async def get_join_preview(self, share_token: str):
+        _ = share_token
+        return CandidateJoinPreviewResponse(
+            session_id="session-1",
+            status="published",
+            schedule=InterviewSchedulePayload(
+                scheduled_start_at="2026-04-20T09:00:00+07:00",
+                schedule_timezone="Asia/Ho_Chi_Minh",
+                schedule_status="scheduled",
+                schedule_note="Phong van dung gio.",
+                candidate_proposed_start_at=None,
+                candidate_proposed_note=None,
+            ),
         )
 
     async def append_turn(self, session_id, payload):
@@ -440,8 +457,20 @@ class FakeCompanyKnowledgeService:
         )
 
 
+SENSITIVE_READ_ENDPOINTS = [
+    "/api/v1/interviews/sessions/session-1/review",
+    "/api/v1/interviews/sessions/session-1/feedback",
+    "/api/v1/interviews/jd/jd-1/feedback-summary",
+    "/api/v1/interviews/jd/jd-1/feedback-policy",
+]
 
-def build_client(monkeypatch: MonkeyPatch) -> TestClient:
+
+def build_client(
+    monkeypatch: MonkeyPatch,
+    *,
+    current_user: User | None = None,
+    auth_error: HTTPException | None = None,
+) -> TestClient:
     @asynccontextmanager
     async def fake_lifespan(_: FastAPI):
         yield
@@ -450,22 +479,20 @@ def build_client(monkeypatch: MonkeyPatch) -> TestClient:
         yield object()
 
     async def fake_current_user():
-        return User(id="user-1", email="hr@example.com", role="hr", is_active=True)
+        if auth_error is not None:
+            raise auth_error
+        return current_user or User(id="user-1", email="hr@example.com", role="hr", is_active=True)
 
-    app.router.lifespan_context = fake_lifespan
-    app.dependency_overrides[get_db] = fake_db_session
+    monkeypatch.setattr(app.router, "lifespan_context", fake_lifespan)
+    app.dependency_overrides.clear()
+    monkeypatch.setitem(app.dependency_overrides, get_db, fake_db_session)
 
     module = import_module("src.api.v1.interviews")
     monkeypatch.setattr(module, "InterviewSessionService", FakeInterviewSessionService)
     monkeypatch.setattr(module, "InterviewRuntimeService", FakeInterviewRuntimeService)
     monkeypatch.setattr(module, "InterviewFeedbackService", FakeInterviewFeedbackService)
     monkeypatch.setattr(module, "CompanyKnowledgeService", FakeCompanyKnowledgeService)
-    app.dependency_overrides[module.get_current_active_user] = fake_current_user
-    monkeypatch.setattr(module, "settings", type("Settings", (), {"worker_callback_secret": "change-me"})())
-    return TestClient(app)
-    monkeypatch.setattr(module, "InterviewSessionService", FakeInterviewSessionService)
-    monkeypatch.setattr(module, "InterviewRuntimeService", FakeInterviewRuntimeService)
-    monkeypatch.setattr(module, "CompanyKnowledgeService", FakeCompanyKnowledgeService)
+    monkeypatch.setitem(app.dependency_overrides, module.get_current_active_user, fake_current_user)
     monkeypatch.setattr(module, "settings", type("Settings", (), {"worker_callback_secret": "change-me"})())
     return TestClient(app)
 
@@ -519,6 +546,16 @@ def test_join_interview_returns_room_and_token(monkeypatch: MonkeyPatch) -> None
     assert payload["participant_token"] == "token-1"
 
 
+def test_get_join_preview_returns_public_schedule(monkeypatch: MonkeyPatch) -> None:
+    client = build_client(monkeypatch)
+    response = client.get("/api/v1/interviews/join/share-token-1")
+
+    assert response.status_code == 200
+    assert response.json()["session_id"] == "session-1"
+    assert response.json()["schedule"]["scheduled_start_at"] == "2026-04-20T09:00:00+07:00"
+    assert response.json()["schedule"]["schedule_status"] == "scheduled"
+
+
 def test_get_session_detail_returns_runtime_state(monkeypatch: MonkeyPatch) -> None:
     client = build_client(monkeypatch)
     response = client.get("/api/v1/interviews/sessions/session-1")
@@ -530,6 +567,41 @@ def test_get_session_detail_returns_runtime_state(monkeypatch: MonkeyPatch) -> N
     assert response.json()["plan"]["questions"][0]["source"] == "manual"
     assert response.json()["plan"]["plan_events"][0]["event_type"] == "plan.created"
     assert response.json()["total_questions"] == 1
+
+
+def test_get_session_detail_is_public_for_candidate_polling(monkeypatch: MonkeyPatch) -> None:
+    client = build_client(
+        monkeypatch,
+        auth_error=HTTPException(status_code=401, detail="Invalid authentication credentials"),
+    )
+    response = client.get("/api/v1/interviews/sessions/session-1")
+
+    assert response.status_code == 200
+    assert response.json()["session_id"] == "session-1"
+
+
+def test_sensitive_read_endpoints_require_authenticated_user(monkeypatch: MonkeyPatch) -> None:
+    client = build_client(
+        monkeypatch,
+        auth_error=HTTPException(status_code=401, detail="Invalid authentication credentials"),
+    )
+
+    for endpoint in SENSITIVE_READ_ENDPOINTS:
+        response = client.get(endpoint)
+        assert response.status_code == 401
+        assert response.json() == {"detail": "Invalid authentication credentials"}
+
+
+def test_sensitive_read_endpoints_forbid_non_hr_roles(monkeypatch: MonkeyPatch) -> None:
+    client = build_client(
+        monkeypatch,
+        current_user=User(id="user-2", email="candidate@example.com", role="candidate", is_active=True),
+    )
+
+    for endpoint in SENSITIVE_READ_ENDPOINTS:
+        response = client.get(endpoint)
+        assert response.status_code == 403
+        assert response.json() == {"detail": "HR or admin access required"}
 
 
 def test_get_session_runtime_state_requires_worker_secret(monkeypatch: MonkeyPatch) -> None:
@@ -553,10 +625,61 @@ def test_get_session_runtime_state_returns_current_question(monkeypatch: MonkeyP
     assert response.json()["last_plan_event"]["decision_rule"] == "generic_answer_needs_clarification"
 
 
-def test_post_runtime_event_accepts_worker_callback(monkeypatch: MonkeyPatch) -> None:
+def test_append_turn_requires_worker_secret(monkeypatch: MonkeyPatch) -> None:
+    client = build_client(monkeypatch)
+    response = client.post(
+        "/api/v1/interviews/sessions/session-1/turns",
+        json=TranscriptTurnRequest(
+            speaker="assistant",
+            transcript_text="Xin chao, chung ta bat dau nhe.",
+            sequence_number=0,
+            provider_event_id="evt-1",
+        ).model_dump(),
+    )
+
+    assert response.status_code == 401
+    assert response.json() == {"detail": "Invalid worker callback secret"}
+
+
+def test_append_turn_accepts_worker_callback_secret(monkeypatch: MonkeyPatch) -> None:
+    client = build_client(monkeypatch)
+    response = client.post(
+        "/api/v1/interviews/sessions/session-1/turns",
+        headers={"X-Worker-Callback-Secret": "change-me"},
+        json=TranscriptTurnRequest(
+            speaker="assistant",
+            transcript_text="Xin chao, chung ta bat dau nhe.",
+            sequence_number=0,
+            provider_event_id="evt-1",
+        ).model_dump(),
+    )
+
+    assert response.status_code == 204
+
+
+def test_post_runtime_event_requires_worker_secret(monkeypatch: MonkeyPatch) -> None:
     client = build_client(monkeypatch)
     response = client.post(
         "/api/v1/interviews/sessions/session-1/runtime-events",
+        json={
+            "event_type": "worker.connected",
+            "event_source": "worker",
+            "session_status": "connecting",
+            "worker_status": "room_connected",
+            "provider_status": "livekit_connected",
+            "payload": {},
+        },
+    )
+
+    assert response.status_code == 401
+    assert response.json() == {"detail": "Invalid worker callback secret"}
+
+
+def test_post_runtime_event_accepts_worker_callback_secret(monkeypatch: MonkeyPatch) -> None:
+    client = build_client(monkeypatch)
+    response = client.post(
+        "/api/v1/interviews/sessions/session-1/runtime-events",
+        headers={"X-Worker-Callback-Secret": "change-me"},
         json={
             "event_type": "worker.connected",
             "event_source": "worker",
@@ -632,11 +755,41 @@ def test_apply_policy_returns_active_policy(monkeypatch: MonkeyPatch) -> None:
     assert response.json()["status"] == "active"
 
 
-def test_complete_session_accepts_worker_request(monkeypatch: MonkeyPatch) -> None:
+def test_complete_session_requires_worker_secret(monkeypatch: MonkeyPatch) -> None:
     client = build_client(monkeypatch)
     response = client.post(
         "/api/v1/interviews/sessions/session-1/complete",
         json=CompleteInterviewRequest(reason="candidate_left").model_dump(),
+    )
+
+    assert response.status_code == 401
+    assert response.json() == {"detail": "Invalid worker callback secret"}
+
+
+def test_complete_session_accepts_worker_callback_secret(monkeypatch: MonkeyPatch) -> None:
+    client = build_client(monkeypatch)
+    response = client.post(
+        "/api/v1/interviews/sessions/session-1/complete",
+        headers={"X-Worker-Callback-Secret": "change-me"},
+        json=CompleteInterviewRequest(reason="candidate_left").model_dump(),
+    )
+
+    assert response.status_code == 204
+
+
+def test_expire_reconnect_requires_worker_secret(monkeypatch: MonkeyPatch) -> None:
+    client = build_client(monkeypatch)
+    response = client.post("/api/v1/interviews/sessions/session-1/expire-reconnect")
+
+    assert response.status_code == 401
+    assert response.json() == {"detail": "Invalid worker callback secret"}
+
+
+def test_expire_reconnect_accepts_worker_callback_secret(monkeypatch: MonkeyPatch) -> None:
+    client = build_client(monkeypatch)
+    response = client.post(
+        "/api/v1/interviews/sessions/session-1/expire-reconnect",
+        headers={"X-Worker-Callback-Secret": "change-me"},
     )
 
     assert response.status_code == 204
@@ -682,6 +835,17 @@ def test_worker_can_query_company_knowledge_for_session(monkeypatch: MonkeyPatch
 
     assert response.status_code == 200
     assert response.json()["citations"][0]["file_name"] == "company-handbook.pdf"
+
+
+def test_company_knowledge_query_requires_worker_secret(monkeypatch: MonkeyPatch) -> None:
+    client = build_client(monkeypatch)
+    response = client.post(
+        "/api/v1/interviews/sessions/session-1/knowledge-query",
+        json={"query": "benefits"},
+    )
+
+    assert response.status_code == 401
+    assert response.json() == {"detail": "Invalid worker callback secret"}
 
 
 def test_company_knowledge_query_rejects_wrong_worker_secret(monkeypatch: MonkeyPatch) -> None:
