@@ -13,8 +13,11 @@ export function CVScreeningRisks({
     >
       <div className="space-y-3">
         {items.length ? (
-          items.map((item) => (
-            <article className="rounded-[16px] border border-[var(--color-brand-input-border)] p-4" key={item.title.en}>
+          items.map((item, index) => (
+            <article
+              className="rounded-[16px] border border-[var(--color-brand-input-border)] p-4"
+              key={`${item.title.en}-${index}`}
+            >
               <div className="flex flex-wrap items-start justify-between gap-3">
                 <div>
                   <p className="text-sm font-semibold text-[var(--color-brand-text-primary)]">{item.title.vi}</p>

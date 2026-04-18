@@ -5,6 +5,7 @@ import { useState } from "react"
 import { useJobTracker } from "@/components/dashboard/job-tracker"
 import { JDAnalysisContent } from "@/components/jd/jd-analysis-board"
 import type { JDAnalysisEnqueueResponse, JDAnalysisResponse } from "@/components/jd/jd-analysis-types"
+import { resolveApiBaseUrl } from "@/lib/api"
 
 export { JDAnalysisContent } from "@/components/jd/jd-analysis-board"
 export type { BackgroundJobResponse, BilingualText, HumanReadableText, JDAnalysisResponse } from "@/components/jd/jd-analysis-types"
@@ -20,6 +21,7 @@ export function JDUploadPanel({ accessToken, backendBaseUrl }: JDUploadPanelProp
   const [result, setResult] = useState<JDAnalysisResponse | null>(null)
   const [error, setError] = useState<string | null>(null)
   const [isUploading, setIsUploading] = useState(false)
+  const apiBaseUrl = resolveApiBaseUrl(backendBaseUrl)
 
   async function handleSubmit(event: React.FormEvent<HTMLFormElement>) {
     event.preventDefault()
@@ -36,7 +38,7 @@ export function JDUploadPanel({ accessToken, backendBaseUrl }: JDUploadPanelProp
     formData.append("file", selectedFile)
 
     try {
-      const response = await fetch(`${backendBaseUrl}/api/v1/jd/analyze`, {
+      const response = await fetch(`${apiBaseUrl}/jd/analyze`, {
         method: "POST",
         headers: {
           Authorization: `Bearer ${accessToken}`,

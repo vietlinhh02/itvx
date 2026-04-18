@@ -52,7 +52,9 @@ function AuditList({
     <section>
       <p className="text-sm font-semibold text-[var(--color-brand-text-primary)]">{title}</p>
       <div className="mt-3 space-y-2 text-sm text-[var(--color-brand-text-body)]">
-        {items.length ? items.map((item) => <p key={item}>{item}</p>) : <EmptyValue text={emptyText} />}
+        {items.length
+          ? items.map((item, index) => <p key={`${item}-${index}`}>{item}</p>)
+          : <EmptyValue text={emptyText} />}
       </div>
     </section>
   )

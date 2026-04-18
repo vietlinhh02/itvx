@@ -1,11 +1,9 @@
 "use client"
 
 import { CaretDown, ShieldWarning, Sparkle, Target } from "@phosphor-icons/react"
-import type { Route } from "next"
 import { useState } from "react"
 
 import type { BilingualText, HumanReadableText, JDAnalysisResponse } from "@/components/jd/jd-analysis-types"
-import { AppLink } from "@/components/navigation/app-link"
 
 type JDAnalysisContentProps = {
   result: JDAnalysisResponse
@@ -26,15 +24,15 @@ export function JDAnalysisContent({ result }: JDAnalysisContentProps) {
           </div>
           <div className="flex flex-wrap items-center gap-3">
             <section className="rounded-[16px] bg-[var(--color-primary-50)] px-4 py-3 text-sm text-[var(--color-brand-primary)]">
-              <p className="font-semibold">Trạng thái: {result.status}</p>
-              <p className="mt-1 text-[var(--color-brand-text-body)]">Mã JD: {result.jd_id}</p>
+              <p className="font-semibold">Trạng thái: {formatJDStatus(result.status)}</p>
+              <p className="mt-1 break-all font-mono text-[var(--color-brand-text-body)]">Mã JD: {result.jd_id}</p>
             </section>
-            <AppLink
+            <a
               className="flex items-center justify-center rounded-full bg-[var(--color-brand-primary)] px-4 py-3 text-sm font-semibold text-white"
-              href={buildJDDetailHref(result.jd_id)}
+              href="#cv-screening-panel"
             >
-              Mở chi tiết mô tả công việc
-            </AppLink>
+              Xem nhanh phần sàng lọc CV
+            </a>
           </div>
         </div>
       </section>
@@ -373,10 +371,6 @@ function readableKey(value: HumanReadableText) {
   return typeof value === "string" ? value : value.en
 }
 
-function buildJDDetailHref(jdId: string): Route {
-  return `/dashboard/jd/${jdId}` as Route
-}
-
 function PriorityBadge({ priority }: { priority: string }) {
   const config = getPriorityConfig(priority)
   const Icon = config.icon
@@ -413,4 +407,12 @@ function getPriorityConfig(priority: string) {
     icon: Sparkle,
     className: "bg-violet-50 text-violet-700",
   }
+}
+
+function formatJDStatus(status: JDAnalysisResponse["status"]) {
+  if (status === "completed") {
+    return "Hoàn tất"
+  }
+
+  return status
 }
