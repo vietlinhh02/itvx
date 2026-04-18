@@ -62,6 +62,12 @@ export type PublishInterviewResponse = {
   schedule: InterviewSchedule
 }
 
+export type CandidateJoinPreviewResponse = {
+  session_id: string
+  status: string
+  schedule: InterviewSchedule
+}
+
 export type InterviewSessionCreateResponse = {
   session_id: string
   share_link?: string
@@ -120,7 +126,17 @@ export type InterviewPlanEvent = {
   evidence_excerpt?: { vi: string; en: string } | null
   decision_rule?: string | null
   next_question_type?: string | null
+  semantic_evaluation?: InterviewSemanticAnswerEvaluation | null
   created_at: string
+}
+
+export type InterviewSemanticAnswerEvaluation = {
+  answer_quality: "strong" | "partial" | "low_signal" | "off_topic" | "explicit_gap" | "inconsistent"
+  evidence_progress: "improved" | "unchanged" | "regressed"
+  recommended_action: "continue" | "clarify" | "move_on" | "recovery" | "wrap_up"
+  reason: { vi: string; en: string }
+  confidence: number
+  needs_hr_review: boolean
 }
 
 export type InterviewPolicyThresholds = {
@@ -129,8 +145,12 @@ export type InterviewPolicyThresholds = {
   strong_evidence_threshold: number
   wrap_up_confidence_threshold: number
   escalate_after_consecutive_adjustments: number
+  max_clarification_turns_per_competency: number
   measurable_signal_bonus: number
   example_signal_bonus: number
+  semantic_default_confidence_threshold: number
+  semantic_move_on_confidence_threshold: number
+  semantic_recovery_confidence_threshold: number
 }
 
 export type InterviewCompetencyPolicyOverride = {
@@ -167,7 +187,13 @@ export type InterviewPlan = {
   current_phase?: string | null
   current_competency_index?: number
   next_intended_step?: { vi: string; en: string } | null
-  interview_decision_status?: "continue" | "adjust" | "ready_to_wrap" | "escalate_hr" | null
+  interview_decision_status?:
+    | "continue"
+    | "adjust"
+    | "continue_with_hr_flag"
+    | "ready_to_wrap"
+    | "escalate_hr"
+    | null
   question_selection_policy?: { vi: string; en: string } | null
   transition_rules?: Array<{ vi: string; en: string }>
   completion_criteria?: Array<{ vi: string; en: string }>
