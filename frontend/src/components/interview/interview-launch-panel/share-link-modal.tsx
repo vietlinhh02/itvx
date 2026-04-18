@@ -5,12 +5,16 @@ import { useState } from "react"
 import { formatSchedule } from "@/components/interview/interview-launch-panel/helpers"
 
 export function ShareLinkModal({
+  roomName,
   shareLink,
   scheduledStartAt,
+  sessionId,
   onClose,
 }: {
+  roomName: string
   shareLink: string
   scheduledStartAt: string | null
+  sessionId: string
   onClose: () => void
 }) {
   const [copyStatus, setCopyStatus] = useState<"idle" | "copied" | "failed">("idle")
@@ -39,6 +43,8 @@ export function ShareLinkModal({
             <p className="mt-2 text-sm text-[var(--color-brand-text-body)]">
               Thời gian hẹn: {formatSchedule(scheduledStartAt)}
             </p>
+            <p className="mt-2 text-sm text-[var(--color-brand-text-body)]">Session ID: {sessionId}</p>
+            <p className="mt-1 text-sm text-[var(--color-brand-text-body)]">Room name: {roomName}</p>
           </div>
           <button
             className="rounded-full border border-[var(--color-brand-input-border)] px-4 py-2 text-sm font-medium text-[var(--color-brand-text-primary)]"
