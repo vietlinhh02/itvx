@@ -2,10 +2,14 @@ export function SessionStatusCard({
   status,
   workerStatus,
   providerStatus,
+  lastErrorCode,
+  lastErrorMessage,
 }: {
   status: string
   workerStatus: string
   providerStatus: string
+  lastErrorCode?: string | null
+  lastErrorMessage?: string | null
 }) {
   return (
     <section className="rounded-[24px] bg-white p-4 shadow-[0px_10px_30px_0px_rgba(15,79,87,0.06)]">
@@ -24,6 +28,12 @@ export function SessionStatusCard({
           <dd>{providerStatus}</dd>
         </div>
       </dl>
+      {lastErrorMessage ? (
+        <div className="mt-4 rounded-[16px] bg-rose-50 px-4 py-3 text-sm text-rose-700">
+          {lastErrorCode ? <p className="font-semibold">{lastErrorCode}</p> : null}
+          <p className={lastErrorCode ? "mt-1" : undefined}>{lastErrorMessage}</p>
+        </div>
+      ) : null}
     </section>
   )
 }

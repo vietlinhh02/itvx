@@ -39,7 +39,6 @@ export function LiveRoom({
   const serverUrl = process.env.NEXT_PUBLIC_LIVEKIT_URL ?? ""
   const [connectRoom, setConnectRoom] = useState(false)
   const [audioEnabled, setAudioEnabled] = useState(true)
-  const [videoEnabled, setVideoEnabled] = useState(false)
   const [toastMessage, setToastMessage] = useState<string | null>(null)
   const [showStatus, setShowStatus] = useState(false)
   const [selectedAudioDeviceId, setSelectedAudioDeviceId] = useState<string | null>(null)
@@ -202,7 +201,7 @@ export function LiveRoom({
                 Tham gia phòng phỏng vấn
               </h2>
               <p className="mt-3 max-w-2xl text-base leading-7 text-[var(--color-brand-text-body)]">
-                Kiểm tra micro và camera, sau đó kết nối khi bạn đã sẵn sàng.
+                Kiểm tra micro, sau đó kết nối khi bạn đã sẵn sàng.
               </p>
               <div className="interview-prejoin-shell mt-8 space-y-5 rounded-[20px] border border-[var(--color-brand-input-border)] bg-[var(--color-primary-50)]/40 p-5">
                 <PreJoinAiWavePreview />
@@ -230,15 +229,6 @@ export function LiveRoom({
                           onChange={(event) => setAudioEnabled(event.target.checked)}
                         />
                       </label>
-                      <label className="flex items-center justify-between rounded-full border border-[var(--color-brand-input-border)] bg-white px-4 py-3 text-sm font-semibold text-[var(--color-brand-text-primary)]">
-                        <span>Camera</span>
-                        <input
-                          type="checkbox"
-                          className="h-4 w-4 accent-[var(--color-brand-primary)]"
-                          checked={videoEnabled}
-                          onChange={(event) => setVideoEnabled(event.target.checked)}
-                        />
-                      </label>
                       <button
                         type="button"
                         className="min-h-12 w-full rounded-full bg-[var(--color-brand-primary)] px-5 py-3 text-sm font-semibold text-white"
@@ -262,7 +252,7 @@ export function LiveRoom({
             serverUrl={serverUrl}
             connect={connectRoom}
             audio={audioCaptureOptions}
-            video={videoEnabled}
+            video={false}
             options={{
               audioCaptureDefaults: roomAudioCaptureDefaults,
             }}
@@ -313,6 +303,8 @@ export function LiveRoom({
                   status={sessionDetail.status}
                   workerStatus={sessionDetail.worker_status}
                   providerStatus={sessionDetail.provider_status}
+                  lastErrorCode={sessionDetail.last_error_code}
+                  lastErrorMessage={sessionDetail.last_error_message}
                 />
               ) : null}
             </div>

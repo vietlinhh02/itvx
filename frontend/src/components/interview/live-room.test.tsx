@@ -79,6 +79,25 @@ test("enables browser echo and noise cancellation when connecting to the live ro
   })
 })
 
+test("hard-disables camera in the prejoin flow and live room connection", async () => {
+  capturedLiveKitRoomProps = null
+
+  render(
+    <LiveRoom
+      participantName="Nguyen Van A"
+      roomName="interview-room-1"
+      participantToken="token-123"
+    />,
+  )
+
+  expect(screen.queryByText("Camera")).not.toBeInTheDocument()
+
+  await userEvent.setup().click(screen.getByRole("button", { name: "Kết nối vào buổi phỏng vấn" }))
+
+  expect(capturedLiveKitRoomProps).not.toBeNull()
+  expect(((capturedLiveKitRoomProps as unknown) as { video?: unknown }).video).toBe(false)
+})
+
 test("prompts the candidate to speak first when no transcript has started yet", async () => {
   render(
     <LiveRoom
