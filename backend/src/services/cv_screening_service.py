@@ -718,9 +718,11 @@ class CVScreeningService:
         if self._db_session is None:
             return None
         session = await self._db_session.scalar(
-            select(InterviewSession.id).where(
+            select(InterviewSession.id)
+            .where(
                 InterviewSession.candidate_screening_id == screening_id
             )
+            .order_by(InterviewSession.created_at.desc())
         )
         return cast(str | None, session)
 
