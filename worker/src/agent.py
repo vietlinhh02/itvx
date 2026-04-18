@@ -22,6 +22,8 @@ VIETNAMESE_LANGUAGE_CODE = "vi-VN"
 INTERRUPTION_MIN_DURATION_SECONDS = 0.8
 INTERRUPTION_MIN_WORDS = 2
 FALSE_INTERRUPTION_TIMEOUT_SECONDS = 2.0
+CONTEXT_WINDOW_TRIGGER_TOKENS = 24000
+CONTEXT_WINDOW_TARGET_TOKENS = 12000
 
 
 def required_runtime_env() -> tuple[str, ...]:
@@ -50,6 +52,10 @@ def build_realtime_model(config: WorkerConfig) -> google.realtime.RealtimeModel:
         language=VIETNAMESE_LANGUAGE_CODE,
         input_audio_transcription=transcription_config,
         output_audio_transcription=build_audio_transcription_config(),
+        context_window_compression=genai_types.ContextWindowCompressionConfig(
+            trigger_tokens=CONTEXT_WINDOW_TRIGGER_TOKENS,
+            sliding_window=genai_types.SlidingWindow(target_tokens=CONTEXT_WINDOW_TARGET_TOKENS),
+        ),
         thinking_config=genai_types.ThinkingConfig(include_thoughts=False),
     )
 
@@ -389,9 +395,9 @@ class InterviewRealtimeAgent(Agent):
             + "Ứng viên sẽ nói trước để bắt đầu. Ở lượt phản hồi đầu tiên của bạn, hãy chào rất ngắn gọn rồi hỏi đúng câu mở đầu này: "
             + f"{opening_question}. "
             + "Từ lượt trả lời thứ hai của ứng viên trở đi, trước khi hỏi tiếp, hãy gọi tool fetch_interview_runtime_state để lấy đúng trạng thái hiện tại. "
-            + "Nếu decision_status là continue hoặc adjust và current_question_vi có giá trị, hãy hỏi đúng current_question_vi, không tự viết lại ý. "
-            + "Nếu decision_status là ready_to_wrap, hãy kết thúc lịch sự bằng tiếng Việt rồi gọi tool end_interview với reason='agent_wrap_up'. "
-            + "Nếu decision_status là escalate_hr, hãy nói ngắn gọn rằng HR sẽ xem xét thêm, cảm ơn ứng viên, rồi gọi tool end_interview với reason='escalate_hr'. "
+            + "Nếu decision_status là continue, adjust, hoặc continue_with_hr_flag và current_question_vi có giá trị, hãy hỏi đúng current_question_vi, không tự viết lại ý. "
+            + "Nếu decision_status là ready_to_wrap và needs_hr_review là false, hãy kết thúc lịch sự bằng tiếng Việt rồi gọi tool end_interview với reason='agent_wrap_up'. "
+            + "Nếu decision_status là ready_to_wrap và needs_hr_review là true, hãy cảm ơn ứng viên, nói ngắn gọn rằng HR sẽ xem xét thêm sau buổi này, rồi gọi tool end_interview với reason='agent_wrap_up'. "
             + "Nếu bạn vừa trả lời câu hỏi về công ty, hãy gọi fetch_interview_runtime_state rồi quay lại flow phỏng vấn."
         )
 
@@ -436,6 +442,7 @@ class InterviewRealtimeAgent(Agent):
             "provider_status": payload.get("provider_status"),
             "current_question_index": payload.get("current_question_index"),
             "decision_status": payload.get("interview_decision_status"),
+            "needs_hr_review": payload.get("needs_hr_review"),
             "current_phase": payload.get("current_phase"),
             "current_question_vi": current_question_vi,
             "opening_question_vi": self._opening_question,
@@ -457,6 +464,39 @@ class InterviewRealtimeAgent(Agent):
         if not self._supports_prompted_turns:
             logger.info("waiting for candidate speech to start interview because model requires user-initiated turns")
             return
+        try:
+            runtime_state = await self._backend.get_runtime_state(self._session_id)
+        except Exception:
+            logger.exception("failed to fetch runtime state on enter; falling back to opening question")
+            runtime_state = {}
+
+        decision_status = runtime_state.get("interview_decision_status")
+        needs_hr_review = bool(runtime_state.get("needs_hr_review"))
+        if decision_status == "ready_to_wrap":
+            self.ask_wrap_up(needs_hr_review=needs_hr_review)
+            return
+
+        current_question = runtime_state.get("current_question")
+        prompt_payload = current_question.get("prompt") if isinstance(current_question, dict) else None
+        current_question_vi = prompt_payload.get("vi") if isinstance(prompt_payload, dict) else None
+        current_question_index = runtime_state.get("current_question_index")
+
+        if isinstance(current_question_vi, str) and current_question_vi.strip():
+            if isinstance(current_question_index, int) and current_question_index > 0:
+                self.ask_follow_up(
+                    current_question_vi,
+                    preamble="Tiếp tục, hãy hỏi đúng câu sau bằng tiếng Việt:",
+                )
+                return
+            self.session.generate_reply(
+                instructions=(
+                    "Chào ứng viên ngắn gọn bằng tiếng Việt, rồi hỏi đúng câu mở đầu sau: "
+                    f"{current_question_vi}"
+                ),
+                input_modality="audio",
+            )
+            return
+
         self.session.generate_reply(
             instructions=(
                 "Chào ứng viên ngắn gọn bằng tiếng Việt, rồi hỏi đúng câu mở đầu sau: "
@@ -472,11 +512,17 @@ class InterviewRealtimeAgent(Agent):
         instruction = question if preamble is None else f"{preamble} {question}"
         self.session.generate_reply(instructions=instruction, input_modality="audio")
 
-    def ask_wrap_up(self) -> None:
+    def ask_wrap_up(self, *, needs_hr_review: bool = False) -> None:
+        instructions = (
+            "Hãy tóm tắt ngắn gọn rằng bạn đã thu thập đủ tín hiệu chính, hỏi một câu kết nhẹ nếu cần, rồi lịch sự kết thúc buổi phỏng vấn bằng tiếng Việt."
+        )
+        if needs_hr_review:
+            instructions = (
+                "Hãy cảm ơn ứng viên, tóm tắt ngắn gọn rằng bạn đã thu thập đủ tín hiệu chính, "
+                "nói tự nhiên bằng tiếng Việt rằng HR sẽ xem xét thêm sau buổi này, rồi lịch sự kết thúc buổi phỏng vấn."
+            )
         self.session.generate_reply(
-            instructions=(
-                "Hãy tóm tắt ngắn gọn rằng bạn đã thu thập đủ tín hiệu chính, hỏi một câu kết nhẹ nếu cần, rồi lịch sự kết thúc buổi phỏng vấn bằng tiếng Việt."
-            ),
+            instructions=instructions,
             input_modality="audio",
         )
 
@@ -545,6 +591,7 @@ class SessionRuntimeHandler:
             async with sync_runtime_plan_lock:
                 runtime_state = await self._backend.get_runtime_state(self._session_id)
                 decision_status = runtime_state.get("interview_decision_status")
+                needs_hr_review = bool(runtime_state.get("needs_hr_review"))
                 current_question_index = runtime_state.get("current_question_index", 0)
                 current_question = runtime_state.get("current_question")
                 if decision_status == "ready_to_wrap":
@@ -552,14 +599,7 @@ class SessionRuntimeHandler:
                         return
                     pending_completion_reason = "agent_wrap_up"
                     await controller.mark_wrap_up_started()
-                    active_agent.ask_wrap_up()
-                    return
-                if decision_status == "escalate_hr":
-                    if pending_completion_reason is not None:
-                        return
-                    pending_completion_reason = "escalate_hr"
-                    await controller.mark_escalated_to_hr_boundary()
-                    active_agent.ask_hr_escalation_close()
+                    active_agent.ask_wrap_up(needs_hr_review=needs_hr_review)
                     return
                 if not isinstance(current_question, dict):
                     return
@@ -637,6 +677,16 @@ class SessionRuntimeHandler:
                 _complete_after_grace_period()
             )
 
+        def _on_room_disconnected(reason: object) -> None:
+            logger.info(
+                "room disconnected room_name=%s session_id=%s reason=%s",
+                self._room_name,
+                self._session_id,
+                reason,
+            )
+            if not completion_fut.done():
+                completion_fut.set_result(None)
+
         session: AgentSession | None = None
         try:
             logger.info(
@@ -653,6 +703,7 @@ class SessionRuntimeHandler:
             )
             self._room.on("participant_connected", _on_participant_connected)
             self._room.on("participant_disconnected", _on_participant_disconnected)
+            self._room.on("disconnected", _on_room_disconnected)
             await controller.mark_connected()
 
             realtime_model = build_realtime_model(self._config)
@@ -707,7 +758,7 @@ class SessionRuntimeHandler:
 async def main() -> None:
     config = WorkerConfig(
         backend_base_url=os.getenv("BACKEND_BASE_URL", "http://localhost:8000"),
-        backend_callback_secret=os.getenv("BACKEND_CALLBACK_SECRET", "change-me"),
+        backend_callback_secret=os.getenv("BACKEND_CALLBACK_SECRET", ""),
         gemini_api_key=os.getenv("GEMINI_API_KEY", ""),
         gemini_model=os.getenv(
             "GEMINI_LIVE_MODEL",
