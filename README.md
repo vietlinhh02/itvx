@@ -48,7 +48,82 @@ sudo apt-get update
 sudo apt-get install -y poppler-utils
 ```
 
-## Environment Files
+## Quick Start
+
+### 1. Create env files
+
+```bash
+cp .env.example .env
+cp frontend/.env.example frontend/.env.local
+```
+
+Edit the copied files before booting the app:
+
+- root `.env`: backend, database, shared runtime settings
+- `frontend/.env.local`: frontend auth and browser-visible config
+
+### 2. Install dependencies
+
+```bash
+cd backend
+uv sync --extra dev
+
+cd ../worker
+uv sync --extra dev
+
+cd ../frontend
+pnpm install
+```
+
+### 3. Start PostgreSQL
+
+```bash
+docker compose up -d postgres
+```
+
+### 4. Start the backend API
+
+Terminal 1:
+
+```bash
+cd backend
+uv run uvicorn src.main:app --reload --host 0.0.0.0 --port 8000
+```
+
+### 5. Start the background job runner
+
+Terminal 2:
+
+```bash
+cd backend
+uv run python -m src.scripts.run_background_jobs
+```
+
+### 6. Start the frontend
+
+Terminal 3:
+
+```bash
+cd frontend
+pnpm dev
+```
+
+### 7. Optional: start the realtime interview worker
+
+Terminal 4:
+
+```bash
+bash backend/src/scripts/run_interview_worker_service.sh
+```
+
+Default local URLs:
+
+- frontend: `http://localhost:3000`
+- backend health: `http://localhost:8000/health`
+- backend docs: `http://localhost:8000/docs`
+
+<details>
+<summary><strong>Environment Setup Details</strong></summary>
 
 This repo uses two environment layers in local development:
 
@@ -60,11 +135,7 @@ This repo uses two environment layers in local development:
 
 Important: the frontend is started from `frontend/`, so it will not reliably use the root `.env` by itself. Put frontend vars in `frontend/.env.local`.
 
-### 1. Create the root `.env`
-
-```bash
-cp .env.example .env
-```
+### Root `.env`
 
 At minimum for basic local development, review these values in `.env`:
 
@@ -92,13 +163,9 @@ Notes:
 - For realtime interview flows, you should still set `WORKER_CALLBACK_SECRET` explicitly when you want every process to share the same value.
 - The backend auto-creates tables on startup via `init_db()`. There is no manual Alembic step required for first boot.
 
-### 2. Create `frontend/.env.local`
+### `frontend/.env.local`
 
-```bash
-cp frontend/.env.example frontend/.env.local
-```
-
-Then edit `frontend/.env.local`:
+Edit `frontend/.env.local` like this:
 
 ```env
 NEXT_PUBLIC_API_URL=http://localhost:8000
@@ -127,7 +194,10 @@ Notes:
 NEXT_PUBLIC_APP_URL=http://localhost:3000
 ```
 
-## Google OAuth Setup
+</details>
+
+<details>
+<summary><strong>Google OAuth Setup</strong></summary>
 
 InterviewX uses Google sign-in in the frontend, then exchanges the Google token with the backend.
 
@@ -145,85 +215,10 @@ http://localhost:3000
 http://localhost:3000/api/auth/callback/google
 ```
 
-## Install Dependencies
+</details>
 
-### Backend
-
-```bash
-cd backend
-uv sync --extra dev
-```
-
-### Worker
-
-```bash
-cd worker
-uv sync --extra dev
-```
-
-### Frontend
-
-```bash
-cd frontend
-pnpm install
-```
-
-## Start the Project
-
-### Step 1. Start PostgreSQL
-
-From the repository root:
-
-```bash
-docker compose up -d postgres
-```
-
-Check it is healthy:
-
-```bash
-docker compose ps
-```
-
-### Step 2. Start the backend API
-
-Open terminal 1:
-
-```bash
-cd backend
-uv run uvicorn src.main:app --reload --host 0.0.0.0 --port 8000
-```
-
-Backend URLs:
-
-- API root: `http://localhost:8000`
-- Health check: `http://localhost:8000/health`
-- Swagger docs: `http://localhost:8000/docs`
-
-### Step 3. Start the backend background job runner
-
-Open terminal 2:
-
-```bash
-cd backend
-uv run python -m src.scripts.run_background_jobs
-```
-
-This process is needed for background JD analysis and CV screening jobs.
-
-### Step 4. Start the frontend
-
-Open terminal 3:
-
-```bash
-cd frontend
-pnpm dev
-```
-
-Frontend URL:
-
-- App: `http://localhost:3000`
-
-## Full Realtime Interview Setup
+<details>
+<summary><strong>Full Realtime Interview Setup</strong></summary>
 
 You only need this section if you want to publish and run live AI interviews.
 
@@ -248,31 +243,24 @@ Also make sure `frontend/.env.local` contains:
 NEXT_PUBLIC_LIVEKIT_URL=wss://your-project.livekit.cloud
 ```
 
-### Start the realtime worker service
-
-Open terminal 4:
-
-```bash
-bash backend/src/scripts/run_interview_worker_service.sh
-```
-
-What this does:
+### What the worker service does
 
 - Starts the worker HTTP service from `worker/`
 - Waits for backend dispatch requests at `http://127.0.0.1:8765`
 - Spawns per-session realtime workers when a new interview is published
 
-## Recommended Local Startup Order
-
-If you want the full project running locally, use this order:
+### Recommended startup order for full local mode
 
 1. `docker compose up -d postgres`
 2. backend API
 3. backend background jobs
-4. worker service, if testing live interviews
+4. worker service
 5. frontend
 
-## First-Time Verification Checklist
+</details>
+
+<details>
+<summary><strong>First-Time Verification Checklist</strong></summary>
 
 ### Basic mode
 
@@ -296,7 +284,10 @@ If you want the full project running locally, use this order:
 7. Answer once and confirm the AI responds
 8. Refresh the HR dashboard and confirm transcript turns appear
 
-## Useful Commands
+</details>
+
+<details>
+<summary><strong>Useful Commands</strong></summary>
 
 ### Backend
 
@@ -321,7 +312,10 @@ pnpm type-check
 pnpm test
 ```
 
-## Troubleshooting
+</details>
+
+<details>
+<summary><strong>Troubleshooting</strong></summary>
 
 ### Frontend says backend is not configured
 
@@ -379,8 +373,13 @@ Make sure `pdftotext` is installed:
 pdftotext -v
 ```
 
-## Notes for Contributors
+</details>
+
+<details>
+<summary><strong>Notes for Contributors</strong></summary>
 
 - Do not commit `.env`, `frontend/.env.local`, or uploaded files in `storage/`
 - The backend and worker both target Python `3.13+`
 - The repo currently uses PostgreSQL locally via Docker Compose
+
+</details>
