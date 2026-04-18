@@ -14,6 +14,7 @@ import {
 } from "react"
 
 import type { BackgroundJobResponse } from "@/components/jd/cv-screening-types"
+import { resolveApiBaseUrl } from "@/lib/api"
 
 type TrackedJob = {
   jobId: string
@@ -82,8 +83,8 @@ export function JobTrackerProvider({ children }: { children: ReactNode }) {
     })
     pushToast({
       tone: "info",
-      title: job.resourceType === "jd" ? "JD analysis queued" : "CV screening queued",
-      description: `${job.title} has been queued for background processing.`,
+      title: job.resourceType === "jd" ? "Đã xếp hàng phân tích JD" : "Đã xếp hàng sàng lọc CV",
+      description: `${job.title} đang chờ được xử lý ở chế độ nền.`,
     })
   }, [pushToast])
 
@@ -124,7 +125,8 @@ export function JobTrackerProvider({ children }: { children: ReactNode }) {
       try {
         const currentJobs = jobsRef.current
         for (const job of currentJobs) {
-          const response = await fetch(`${job.backendBaseUrl}/api/v1/jobs/${job.jobId}`, {
+          const apiBaseUrl = resolveApiBaseUrl(job.backendBaseUrl)
+          const response = await fetch(`${apiBaseUrl}/jobs/${job.jobId}`, {
             headers: {
               Authorization: `Bearer ${job.accessToken}`,
             },
@@ -152,8 +154,8 @@ export function JobTrackerProvider({ children }: { children: ReactNode }) {
           if (job.status !== payload.status && payload.status === "running") {
             pushToast({
               tone: "info",
-              title: job.resourceType === "jd" ? "JD analysis in progress" : "CV screening in progress",
-              description: payload.status_message ?? `${job.title} is running in the background.`,
+              title: job.resourceType === "jd" ? "Đang phân tích JD" : "Đang sàng lọc CV",
+              description: payload.status_message ?? `${job.title} đang được xử lý ở chế độ nền.`,
             })
           }
 
@@ -165,9 +167,9 @@ export function JobTrackerProvider({ children }: { children: ReactNode }) {
                 : (`/dashboard/cv-screenings/${job.resourceId}` as Route)
             pushToast({
               tone: "success",
-              title: job.resourceType === "jd" ? "JD analysis ready" : "CV screening ready",
-              description: `${job.title} has finished processing.`,
-              actionLabel: job.resourceType === "jd" ? "Open JD" : "Open screening",
+              title: job.resourceType === "jd" ? "Phân tích JD đã sẵn sàng" : "Kết quả sàng lọc CV đã sẵn sàng",
+              description: `${job.title} đã được xử lý xong.`,
+              actionLabel: job.resourceType === "jd" ? "Mở JD" : "Mở kết quả sàng lọc",
               actionHref,
             })
             continue
@@ -177,8 +179,8 @@ export function JobTrackerProvider({ children }: { children: ReactNode }) {
             setJobs((current) => current.filter((item) => item.jobId !== job.jobId))
             pushToast({
               tone: "error",
-              title: job.resourceType === "jd" ? "JD analysis failed" : "CV screening failed",
-              description: payload.error_message ?? `${job.title} failed to process.`,
+              title: job.resourceType === "jd" ? "Phân tích JD thất bại" : "Sàng lọc CV thất bại",
+              description: payload.error_message ?? `${job.title} xử lý không thành công.`,
             })
           }
         }
@@ -231,7 +233,7 @@ export function JobTrackerProvider({ children }: { children: ReactNode }) {
                 onClick={() => dismissToast(toast.id)}
                 type="button"
               >
-                Close
+                Đóng
               </button>
             </div>
             {toast.actionHref && toast.actionLabel ? (
