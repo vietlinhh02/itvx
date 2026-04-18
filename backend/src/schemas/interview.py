@@ -1,4 +1,4 @@
-from typing import Any, ClassVar
+from typing import Any, ClassVar, Literal
 
 from pydantic import BaseModel, ConfigDict, Field
 
@@ -33,6 +33,22 @@ class InterviewCompetencyPlan(BaseModel):
     last_updated_at: str | None = None
 
 
+class InterviewSemanticAnswerEvaluation(BaseModel):
+    answer_quality: Literal[
+        "strong",
+        "partial",
+        "low_signal",
+        "off_topic",
+        "explicit_gap",
+        "inconsistent",
+    ]
+    evidence_progress: Literal["improved", "unchanged", "regressed"]
+    recommended_action: Literal["continue", "clarify", "move_on", "recovery", "wrap_up"]
+    reason: BilingualText
+    confidence: float = Field(ge=0.0, le=1.0)
+    needs_hr_review: bool = False
+
+
 class InterviewPlanEvent(BaseModel):
     event_type: str = Field(min_length=1)
     reason: BilingualText
@@ -43,6 +59,7 @@ class InterviewPlanEvent(BaseModel):
     evidence_excerpt: BilingualText | None = None
     decision_rule: str | None = None
     next_question_type: str | None = None
+    semantic_evaluation: InterviewSemanticAnswerEvaluation | None = None
     created_at: str
 
 
@@ -52,8 +69,12 @@ class InterviewPolicyThresholds(BaseModel):
     strong_evidence_threshold: float = Field(default=0.55, ge=0.0, le=1.0)
     wrap_up_confidence_threshold: float = Field(default=0.91, ge=0.0, le=1.0)
     escalate_after_consecutive_adjustments: int = Field(default=2, ge=1)
+    max_clarification_turns_per_competency: int = Field(default=1, ge=0)
     measurable_signal_bonus: float = Field(default=0.15, ge=0.0, le=1.0)
     example_signal_bonus: float = Field(default=0.12, ge=0.0, le=1.0)
+    semantic_default_confidence_threshold: float = Field(default=0.6, ge=0.0, le=1.0)
+    semantic_move_on_confidence_threshold: float = Field(default=0.72, ge=0.0, le=1.0)
+    semantic_recovery_confidence_threshold: float = Field(default=0.68, ge=0.0, le=1.0)
 
 
 class InterviewCompetencyPolicyOverride(BaseModel):
@@ -165,6 +186,12 @@ class PublishInterviewResponse(BaseModel):
     schedule: InterviewSchedulePayload = Field(default_factory=InterviewSchedulePayload)
 
 
+class CandidateJoinPreviewResponse(BaseModel):
+    session_id: str
+    status: str
+    schedule: InterviewSchedulePayload = Field(default_factory=InterviewSchedulePayload)
+
+
 class CandidateJoinResponse(BaseModel):
     session_id: str
     room_name: str
@@ -247,6 +274,7 @@ class InterviewSessionRuntimeStateResponse(BaseModel):
     current_question: InterviewQuestion | None = None
     next_intended_step: BilingualText | None = None
     interview_decision_status: str | None = None
+    needs_hr_review: bool = False
     current_phase: str | None = None
     last_plan_event: InterviewPlanEvent | None = None
 
