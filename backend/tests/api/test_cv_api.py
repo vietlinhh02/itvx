@@ -264,7 +264,8 @@ def build_client(monkeypatch: MonkeyPatch) -> TestClient:
         yield object()
 
     monkeypatch.setattr(app.router, "lifespan_context", fake_lifespan)
-    app.dependency_overrides[get_db] = fake_db_session
+    app.dependency_overrides.clear()
+    monkeypatch.setitem(app.dependency_overrides, get_db, fake_db_session)
     return TestClient(app)
 
 
