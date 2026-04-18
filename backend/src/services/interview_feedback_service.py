@@ -456,6 +456,8 @@ class InterviewFeedbackService:
                     event_penalty += 0.08
                 if chosen_action == "ask_recovery":
                     event_penalty += 0.15
+                if chosen_action == "move_on_from_unresolved_competency":
+                    event_penalty += 0.18
             if status == "needs_recovery":
                 event_penalty += 0.1
             ai_score = max(0.0, min(1.0, base_score - event_penalty))
@@ -676,6 +678,8 @@ class InterviewFeedbackService:
             "Only create competency overrides for competencies that appear in competency_deltas.\n"
             "Keep all numeric values inside the schema ranges implied by the example schema.\n"
             "Make the policy more conservative when disagreement is high, but do not invent unsupported competencies.\n"
+            "Avoid repeated clarification loops. When a competency keeps producing low-signal answers after the clarification budget is exhausted, prefer moving on while recording an unresolved evidence gap.\n"
+            "Use semantic confidence thresholds to control when the semantic evaluator may override heuristics. Keep semantic_move_on_confidence_threshold stricter than semantic_default_confidence_threshold when the JD is sensitive to false positives.\n"
             "Expected effects must be short, factual, and demo-friendly.\n"
             f"JD id: {jd_id}\n"
             f"Feedback summary: {json.dumps(summary.model_dump(mode='json'), ensure_ascii=False)}\n"

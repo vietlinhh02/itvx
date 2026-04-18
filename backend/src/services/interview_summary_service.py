@@ -69,6 +69,15 @@ class InterviewSummaryService:
         competencies = final_plan.get("competencies", []) if isinstance(final_plan, dict) else []
         plan_events = final_plan.get("plan_events", []) if isinstance(final_plan, dict) else []
         decision_status = final_plan.get("interview_decision_status") if isinstance(final_plan, dict) else None
+        needs_hr_review = decision_status in {"continue_with_hr_flag", "escalate_hr"} or any(
+            isinstance(item, dict) and item.get("status") == "needs_recovery"
+            for item in competencies
+        ) or any(
+            isinstance(event, dict)
+            and isinstance(event.get("semantic_evaluation"), dict)
+            and bool(event.get("semantic_evaluation", {}).get("needs_hr_review"))
+            for event in plan_events
+        )
         covered_competencies = [
             item.get("name", {}).get("en")
             for item in competencies
@@ -77,14 +86,18 @@ class InterviewSummaryService:
             and item.get("status") == "covered"
         ]
         required_follow_up = any(
-            isinstance(event, dict) and event.get("chosen_action") in {"ask_clarification", "ask_recovery"}
+            isinstance(event, dict)
+            and event.get("chosen_action")
+            in {"ask_clarification", "ask_recovery", "move_on_from_unresolved_competency"}
             for event in plan_events
         )
         concerns = [] if candidate_turns else ["Chưa ghi nhận đủ câu trả lời từ ứng viên"]
         if required_follow_up:
-            concerns.append("The interview required clarification or recovery follow-up before closing.")
-        if decision_status == "escalate_hr":
-            concerns.append("The final recommendation should stay in HR review because the plan escalated the session.")
+            concerns.append(
+                "The interview required clarification, recovery, or a move-on decision for unresolved evidence before closing."
+            )
+        if needs_hr_review:
+            concerns.append("The final recommendation should stay in HR review because the plan preserved unresolved signals for HR.")
         competency_assessments = []
         for item in competencies:
             if not isinstance(item, dict):
@@ -109,7 +122,7 @@ class InterviewSummaryService:
             "concerns": concerns,
             "recommendation": (
                 "HR review is required before making the final decision."
-                if decision_status == "escalate_hr"
+                if needs_hr_review
                 else "HR nên xem lại transcript chi tiết trước khi quyết định."
             ),
             "turn_breakdown": [
