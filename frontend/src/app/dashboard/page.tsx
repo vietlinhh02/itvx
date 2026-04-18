@@ -3,8 +3,10 @@ import type { Route } from "next"
 import Image from "next/image"
 import { redirect } from "next/navigation"
 
+import { DashboardSystemErrorState } from "@/components/dashboard/dashboard-system-error-state"
 import { AppLink } from "@/components/navigation/app-link"
 import { authOptions } from "@/lib/auth-options"
+import { fetchDashboardJson } from "@/lib/dashboard-server"
 import { formatVietnamDate, formatVietnamDateTime } from "@/lib/datetime"
 
 type BackendUser = {
@@ -37,7 +39,7 @@ const backendBaseUrl = process.env.API_URL ?? process.env.NEXT_PUBLIC_API_URL
 
 const RECOMMENDATION_STYLES: Record<ScreeningListItem["recommendation"], string> = {
   advance: "bg-emerald-50 text-emerald-700",
-  review: "bg-amber-50 text-amber-700",
+  review: "bg-sky-50 text-sky-700",
   reject: "bg-rose-50 text-rose-700",
 }
 
@@ -54,39 +56,59 @@ const HERO_IMAGE_URL =
 export default async function DashboardPage() {
   const session = await getServerSession(authOptions)
 
-  if (!session?.accessToken || !backendBaseUrl) {
+  if (!session?.accessToken) {
     redirect("/login")
   }
 
-  const headers = {
-    Authorization: `Bearer ${session.accessToken}`,
+  if (!backendBaseUrl) {
+    return (
+      <DashboardSystemErrorState
+        title="Không thể tải bảng điều khiển"
+        description="Ứng dụng chưa được cấu hình địa chỉ backend. Hãy kiểm tra API_URL hoặc NEXT_PUBLIC_API_URL."
+      />
+    )
   }
 
-  const [profileResponse, recentJDResponse, screeningsResponse] = await Promise.all([
-    fetch(`${backendBaseUrl}/api/v1/auth/me`, {
-      method: "GET",
-      headers,
-      cache: "no-store",
+  const [profileResult, recentJDResult, screeningsResult] = await Promise.all([
+    fetchDashboardJson<BackendUser>({
+      accessToken: session.accessToken,
+      resourceLabel: "profile",
+      url: `${backendBaseUrl}/api/v1/auth/me`,
     }),
-    fetch(`${backendBaseUrl}/api/v1/jd`, {
-      method: "GET",
-      headers,
-      cache: "no-store",
+    fetchDashboardJson<JDRecentItem[]>({
+      accessToken: session.accessToken,
+      resourceLabel: "recent JD uploads",
+      url: `${backendBaseUrl}/api/v1/jd`,
     }),
-    fetch(`${backendBaseUrl}/api/v1/cv/screenings`, {
-      method: "GET",
-      headers,
-      cache: "no-store",
+    fetchDashboardJson<{ items: ScreeningListItem[] }>({
+      accessToken: session.accessToken,
+      resourceLabel: "screenings",
+      url: `${backendBaseUrl}/api/v1/cv/screenings`,
     }),
   ])
 
-  if (!profileResponse.ok || !recentJDResponse.ok || !screeningsResponse.ok) {
+  if (profileResult.kind === "auth" || recentJDResult.kind === "auth" || screeningsResult.kind === "auth") {
     redirect("/login")
   }
 
-  const profile = (await profileResponse.json()) as BackendUser
-  const recentUploads = (await recentJDResponse.json()) as JDRecentItem[]
-  const { items: screenings } = (await screeningsResponse.json()) as { items: ScreeningListItem[] }
+  if (
+    profileResult.kind !== "success" ||
+    recentJDResult.kind !== "success" ||
+    screeningsResult.kind !== "success"
+  ) {
+    const failedResult = [profileResult, recentJDResult, screeningsResult].find((result) => result.kind !== "success")
+    return (
+      <DashboardSystemErrorState
+        title="Không thể tải bảng điều khiển"
+        description="Backend đang lỗi hoặc không phản hồi khi tải dữ liệu tổng quan."
+        status={failedResult?.status}
+      />
+    )
+  }
+
+  const profile: BackendUser = profileResult.data
+  const recentUploads: JDRecentItem[] = recentJDResult.data
+  const screenings: ScreeningListItem[] = screeningsResult.data.items
 
   const recentJDItems = recentUploads.slice(0, 4)
   const recentScreenings = screenings.slice(0, 6)
@@ -120,17 +142,17 @@ export default async function DashboardPage() {
               <div className="w-full max-w-3xl">
                 <p className="text-sm font-medium text-[var(--color-brand-text-muted)]">Tổng quan nhanh</p>
                 <h1 className="mt-2 text-3xl font-semibold text-[var(--color-brand-text-primary)] lg:text-4xl xl:text-5xl">
-                  Dashboard tuyển dụng tổng quan
+                  Bảng điều khiển tuyển dụng
                 </h1>
                 <p className="mt-3 max-w-3xl text-sm leading-6 text-[var(--color-brand-text-body)] lg:text-base">
-                  Theo dõi nhanh tiến độ phân tích JD, sàng lọc CV và các tín hiệu cần ưu tiên xử lý trong workspace hiện tại.
+                  Theo dõi tiến độ phân tích JD, sàng lọc CV và các đầu việc cần ưu tiên trong không gian làm việc hiện tại.
                 </p>
 
                 <div className="mt-6 grid w-full max-w-2xl gap-3 sm:grid-cols-2">
                   <SummaryPill label="Người dùng" value={profile.name ?? profile.email} />
                   <SummaryPill label="Vai trò" value={profile.role} />
                   <SummaryPill label="Trạng thái" value={profile.is_active ? "Đang hoạt động" : "Tạm khóa"} />
-                  <SummaryPill label="Workspace" value="Backend đã kết nối" />
+                  <SummaryPill label="Kết nối hệ thống" value="Backend đã kết nối" />
                 </div>
 
                 <div className="mt-6 flex flex-wrap gap-3">
@@ -144,10 +166,10 @@ export default async function DashboardPage() {
               <div className="w-full xl:flex xl:justify-end">
                 <div className="max-w-xl rounded-[24px] bg-white/30 p-5 backdrop-blur-[6px]">
                   <p className="text-2xl font-semibold italic text-[var(--color-brand-text-primary)]">
-                    “Những đội ngũ tuyệt vời được tạo nên từ từng quyết định chỉn chu.”
+                    “Great teams are built one thoughtful decision at a time.”
                   </p>
                   <p className="mt-3 text-sm italic text-[var(--color-brand-text-body)]">
-                    Một đội ngũ tốt không đến từ may mắn, mà từ những lựa chọn đúng ở từng bước tuyển dụng.
+                    “The best hires are rarely the result of luck. They come from consistent judgment at every step.”
                   </p>
                 </div>
               </div>
@@ -190,7 +212,7 @@ export default async function DashboardPage() {
               />
               <QuickActionCard
                 href="/dashboard/cv-screenings"
-                title="Rà soát kết quả screening"
+                title="Rà soát kết quả sàng lọc"
                 description="Mở danh sách sàng lọc gần đây để kiểm tra các hồ sơ cần xem xét thêm hoặc có mức độ phù hợp cao."
               />
             </div>
@@ -235,7 +257,7 @@ export default async function DashboardPage() {
                       <p className="mt-1 text-sm text-[var(--color-brand-text-muted)]">{item.file_name}</p>
                     </div>
                     <span className={buildBadgeClass(JD_STATUS_STYLES[item.status] ?? "bg-slate-100 text-slate-700")}>
-                      {item.status}
+                      {formatJDStatus(item.status)}
                     </span>
                   </div>
                   <p className="mt-3 text-xs text-[var(--color-brand-text-muted)]">
@@ -281,7 +303,7 @@ export default async function DashboardPage() {
                 </AppLink>
               ))
             ) : (
-              <EmptyPanel text="Chưa có lượt screening nào. Hãy mở một JD và tải CV để bắt đầu." />
+              <EmptyPanel text="Chưa có lượt sàng lọc nào. Hãy mở một JD và tải CV để bắt đầu." />
             )}
           </div>
         </section>
@@ -298,17 +320,17 @@ export default async function DashboardPage() {
             title="Khuyến nghị tiếp theo"
             description={
               recentUploads.length === 0
-                ? "Hiện chưa có JD nào trong workspace. Ưu tiên tải lên một JD để mở toàn bộ pipeline tuyển dụng."
+                ? "Hiện chưa có JD nào trong không gian làm việc. Ưu tiên tải lên một JD để bắt đầu quy trình tuyển dụng."
                 : screenings.length === 0
-                  ? "Bạn đã có JD nhưng chưa có screening nào. Bước tiếp theo là tải CV từ trang chi tiết JD để tạo đánh giá ứng viên."
-                  : "Workspace đã có đủ JD và screening cơ bản. Bạn nên rà soát các hồ sơ review hoặc match score cao trước."
+                  ? "Bạn đã có JD nhưng chưa có lượt sàng lọc nào. Bước tiếp theo là tải CV từ trang chi tiết JD để tạo đánh giá ứng viên."
+                  : "Dữ liệu JD và sàng lọc cơ bản đã có đủ. Bạn nên ưu tiên rà soát các hồ sơ cần xem xét thêm hoặc có mức độ phù hợp cao."
             }
           />
           <InsightCard
             title="Tín hiệu nổi bật"
             description={
               topScreening
-                ? `Hồ sơ nổi bật nhất hiện tại đạt ${Math.round(topScreening.match_score * 100)}% với tệp ${topScreening.file_name}.`
+                ? `Hồ sơ nổi bật nhất hiện tại đạt mức độ phù hợp ${Math.round(topScreening.match_score * 100)}% với tệp ${topScreening.file_name}.`
                 : "Chưa có đủ dữ liệu để xác định hồ sơ nổi bật."
             }
           />
@@ -316,8 +338,8 @@ export default async function DashboardPage() {
             title="Nhịp độ gần đây"
             description={
               latestScreening
-                ? `Lượt screening mới nhất được tạo ngày ${formatVietnamDate(latestScreening.created_at)} với khuyến nghị ${latestScreening.recommendation}.`
-                : "Chưa có lượt screening nào được ghi nhận gần đây."
+                ? `Lượt sàng lọc mới nhất được tạo ngày ${formatVietnamDate(latestScreening.created_at)} với khuyến nghị ${formatRecommendation(latestScreening.recommendation)}.`
+                : "Chưa có lượt sàng lọc nào được ghi nhận gần đây."
             }
           />
         </div>
@@ -437,7 +459,7 @@ function getDominantRecommendation(items: ScreeningListItem[]) {
   )
 
   return (["advance", "review", "reject"] as const)
-    .map((key) => ({ key, count: counts[key], label: key }))
+    .map((key) => ({ key, count: counts[key], label: formatRecommendation(key) }))
     .sort((left, right) => right.count - left.count)[0]
 }
 
@@ -457,4 +479,21 @@ function formatRecommendation(recommendation: ScreeningListItem["recommendation"
     return "Cần xem xét thêm"
   }
   return "Không phù hợp để đi tiếp"
+}
+
+function formatJDStatus(status: string) {
+  if (status === "completed") {
+    return "Hoàn tất"
+  }
+  if (status === "processing") {
+    return "Đang xử lý"
+  }
+  if (status === "queued") {
+    return "Đang chờ"
+  }
+  if (status === "failed") {
+    return "Thất bại"
+  }
+
+  return status
 }
