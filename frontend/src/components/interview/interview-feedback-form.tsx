@@ -10,6 +10,7 @@ import type {
 } from "@/components/interview/interview-types"
 import { EmptyValue, ReviewSection } from "@/components/jd/cv-screening-ui"
 import { CollapsibleSection } from "@/components/interview/live-room/live-room-shell-parts"
+import { resolveApiBaseUrl } from "@/lib/api"
 
 const judgementOptions = ["accurate", "overrated", "underrated", "insufficient_evidence"] as const
 
@@ -22,7 +23,7 @@ function formatPercent(value: number | null | undefined) {
 
 const recommendationOptions = [
   { value: "", label: "Chọn kết luận" },
-  { value: "advance", label: "Tiến tiếp" },
+  { value: "advance", label: "Mời vào vòng tiếp theo" },
   { value: "review", label: "Cần xem lại" },
   { value: "reject", label: "Từ chối" },
 ]
@@ -167,6 +168,7 @@ export function InterviewFeedbackForm({
   initialFeedback: InterviewFeedbackResponse | null
   onSaved: (value: InterviewFeedbackResponse) => void
 }) {
+  const apiBaseUrl = useMemo(() => resolveApiBaseUrl(backendBaseUrl), [backendBaseUrl])
   const safeAssessments = useMemo(() => assessments ?? [], [assessments])
   const defaultCompetencies = useMemo(
     () =>
@@ -248,7 +250,7 @@ export function InterviewFeedbackForm({
           notes: item.notes?.trim() || null,
         })),
       }
-      const response = await fetch(`${backendBaseUrl}/api/v1/interviews/sessions/${sessionId}/feedback`, {
+      const response = await fetch(`${apiBaseUrl}/interviews/sessions/${sessionId}/feedback`, {
         method: "POST",
         headers: {
           Authorization: `Bearer ${accessToken}`,
