@@ -1,7 +1,8 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-repo_root="/home/eddiesngu/Desktop/Dang/interviewx"
+script_dir="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
+repo_root="$(cd "$script_dir/../../.." && pwd)"
 session_id="${1:?interview session id is required}"
 room_name="${2:?interview room name is required}"
 opening_question="${3:?opening question is required}"

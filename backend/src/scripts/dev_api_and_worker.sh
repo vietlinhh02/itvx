@@ -1,11 +1,26 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-repo_root="/home/eddiesngu/Desktop/Dang/interviewx"
-if [[ -f "$repo_root/.env" ]]; then
+script_dir="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
+repo_root="$(cd "$script_dir/../../.." && pwd)"
+backend_root="$repo_root/backend"
+env_file="${ENV_FILE:-$repo_root/.env}"
+
+derive_local_secret() {
+  python3 - "$repo_root" "$1" <<'PY'
+import hashlib
+import sys
+
+repo_root = sys.argv[1]
+purpose = sys.argv[2]
+print(hashlib.sha256(f"interviewx:{purpose}:{repo_root}".encode()).hexdigest())
+PY
+}
+
+if [[ -f "$env_file" ]]; then
   set -a
   # shellcheck disable=SC1091
-  source "$repo_root/.env"
+  source "$env_file"
   set +a
 fi
 
@@ -14,7 +29,6 @@ required_env=(
   LIVEKIT_API_KEY
   LIVEKIT_API_SECRET
   GEMINI_API_KEY
-  WORKER_CALLBACK_SECRET
 )
 
 for name in "${required_env[@]}"; do
@@ -23,6 +37,8 @@ for name in "${required_env[@]}"; do
     exit 1
   fi
 done
+
+worker_callback_secret="${WORKER_CALLBACK_SECRET:-$(derive_local_secret worker-callback)}"
 
 cleanup() {
   if [[ -n "${api_pid:-}" ]]; then
@@ -36,38 +52,14 @@ cleanup() {
 trap cleanup EXIT INT TERM
 
 (
-  cd "/home/eddiesngu/Desktop/Dang/interviewx/backend"
-  APP_ENV=local uv run python - <<'PY'
-import logging
-
-import uvicorn
-
-logging.basicConfig(level=logging.INFO)
-logging.getLogger("sqlalchemy.engine").setLevel(logging.WARNING)
-logging.getLogger("sqlalchemy.pool").setLevel(logging.WARNING)
-
-uvicorn.run("src.main:app", host="0.0.0.0", port=8000, log_level="info")
-PY
+  cd "$backend_root"
+  APP_ENV=local WORKER_CALLBACK_SECRET="$worker_callback_secret" uv run uvicorn src.main:app --host 0.0.0.0 --port 8000
 ) &
 api_pid=$!
 
 (
-  cd "/home/eddiesngu/Desktop/Dang/interviewx/backend"
-  APP_ENV=local uv run python - <<'PY'
-import logging
-
-from src.scripts.run_background_jobs import main
-
-logging.basicConfig(level=logging.INFO)
-logging.getLogger("sqlalchemy.engine").setLevel(logging.WARNING)
-logging.getLogger("sqlalchemy.pool").setLevel(logging.WARNING)
-
-main_logger = logging.getLogger("src.scripts.run_background_jobs")
-main_logger.setLevel(logging.INFO)
-
-import asyncio
-asyncio.run(main())
-PY
+  cd "$backend_root"
+  APP_ENV=local WORKER_CALLBACK_SECRET="$worker_callback_secret" uv run python -m src.scripts.run_background_jobs
 ) &
 job_worker_pid=$!
 
