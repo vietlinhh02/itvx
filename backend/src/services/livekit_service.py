@@ -1,6 +1,7 @@
-import re
 import logging
-from secrets import token_urlsafe
+import re
+import string
+from secrets import choice, token_urlsafe
 
 from livekit import api
 
@@ -11,14 +12,20 @@ logger = logging.getLogger(__name__)
 
 
 class LiveKitService:
-    def build_room_name(self, screening_id: str) -> str:
-        return f"{settings.livekit_room_prefix}-{screening_id}"
+    def build_room_name(self, candidate_name: str | None = None) -> str:
+        normalized = re.sub(r"[^a-z0-9]+", "-", (candidate_name or "").strip().lower()).strip("-")
+        readable_name = normalized[:32] or "candidate"
+        return f"{settings.livekit_room_prefix}-{readable_name}-{self._build_short_token(6)}"
 
     def build_share_token(self) -> str:
-        return token_urlsafe(24)
+        return self._build_short_token(8)
 
     def build_worker_dispatch_token(self) -> str:
         return token_urlsafe(24)
+
+    def _build_short_token(self, length: int) -> str:
+        alphabet = string.ascii_lowercase + string.digits
+        return "".join(choice(alphabet) for _ in range(length))
 
     def create_candidate_identity(self, session_id: str, candidate_name: str) -> str:
         normalized = re.sub(r"[^a-z0-9]+", "-", candidate_name.strip().lower()).strip("-")
