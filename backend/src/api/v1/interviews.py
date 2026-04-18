@@ -1,14 +1,14 @@
 from typing import Annotated
 
 from fastapi import APIRouter, Depends, Header, HTTPException
-
-from src.api.deps import get_current_active_user
-from src.models.user import User
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from src.api.deps import get_current_active_user
 from src.config import settings
 from src.database import get_db
+from src.models.user import User
 from src.schemas.interview import (
+    CandidateJoinPreviewResponse,
     CandidateJoinRequest,
     CandidateJoinResponse,
     CompleteInterviewRequest,
@@ -38,11 +38,26 @@ from src.services.interview_runtime_service import InterviewRuntimeService
 from src.services.interview_session_service import InterviewSessionService
 
 router = APIRouter(prefix="/interviews", tags=["interviews"])
+WorkerCallbackSecretHeader = Annotated[str | None, Header(alias="X-Worker-Callback-Secret")]
 
 
 def _validate_worker_secret(callback_secret: str | None) -> None:
     if callback_secret != settings.worker_callback_secret:
         raise HTTPException(status_code=401, detail="Invalid worker callback secret")
+
+
+def require_worker_callback_secret(
+    worker_callback_secret: WorkerCallbackSecretHeader = None,
+) -> None:
+    _validate_worker_secret(worker_callback_secret)
+
+
+def require_hr_or_admin_user(
+    current_user: Annotated[User, Depends(get_current_active_user)],
+) -> User:
+    if current_user.role not in {"hr", "admin"}:
+        raise HTTPException(status_code=403, detail="HR or admin access required")
+    return current_user
 
 
 @router.post("/generate-questions", response_model=GenerateInterviewQuestionsResponse)
@@ -84,6 +99,18 @@ async def join_interview(
         raise HTTPException(status_code=404, detail=str(exc)) from exc
 
 
+@router.get("/join/{share_token}", response_model=CandidateJoinPreviewResponse)
+async def get_join_preview(
+    share_token: str,
+    db: Annotated[AsyncSession, Depends(get_db)],
+) -> CandidateJoinPreviewResponse:
+    service = InterviewSessionService(db)
+    try:
+        return await service.get_join_preview(share_token)
+    except ValueError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+
+
 @router.post("/join/{share_token}/schedule", response_model=InterviewSchedulePayload)
 async def propose_interview_schedule(
     share_token: str,
@@ -99,7 +126,11 @@ async def propose_interview_schedule(
         raise HTTPException(status_code=status_code, detail=message) from exc
 
 
-@router.post("/sessions/{session_id}/turns", status_code=204)
+@router.post(
+    "/sessions/{session_id}/turns",
+    status_code=204,
+    dependencies=[Depends(require_worker_callback_secret)],
+)
 async def append_turn(
     session_id: str,
     payload: TranscriptTurnRequest,
@@ -112,7 +143,11 @@ async def append_turn(
         raise HTTPException(status_code=404, detail=str(exc)) from exc
 
 
-@router.post("/sessions/{session_id}/complete", status_code=204)
+@router.post(
+    "/sessions/{session_id}/complete",
+    status_code=204,
+    dependencies=[Depends(require_worker_callback_secret)],
+)
 async def complete_session(
     session_id: str,
     payload: CompleteInterviewRequest,
@@ -125,7 +160,10 @@ async def complete_session(
         raise HTTPException(status_code=404, detail=str(exc)) from exc
 
 
-@router.get("/sessions/{session_id}", response_model=InterviewSessionDetailResponse)
+@router.get(
+    "/sessions/{session_id}",
+    response_model=InterviewSessionDetailResponse,
+)
 async def get_session_detail(
     session_id: str,
     db: Annotated[AsyncSession, Depends(get_db)],
@@ -137,16 +175,15 @@ async def get_session_detail(
         raise HTTPException(status_code=404, detail=str(exc)) from exc
 
 
-@router.get("/sessions/{session_id}/runtime-state", response_model=InterviewSessionRuntimeStateResponse)
+@router.get(
+    "/sessions/{session_id}/runtime-state",
+    response_model=InterviewSessionRuntimeStateResponse,
+    dependencies=[Depends(require_worker_callback_secret)],
+)
 async def get_session_runtime_state(
     session_id: str,
     db: Annotated[AsyncSession, Depends(get_db)],
-    worker_callback_secret: Annotated[
-        str | None,
-        Header(alias="X-Worker-Callback-Secret"),
-    ] = None,
 ) -> InterviewSessionRuntimeStateResponse:
-    _validate_worker_secret(worker_callback_secret)
     service = InterviewSessionService(db)
     try:
         return await service.get_runtime_state(session_id)
@@ -169,7 +206,11 @@ async def update_interview_schedule(
         raise HTTPException(status_code=status_code, detail=message) from exc
 
 
-@router.get("/sessions/{session_id}/review", response_model=InterviewSessionReviewResponse)
+@router.get(
+    "/sessions/{session_id}/review",
+    response_model=InterviewSessionReviewResponse,
+    dependencies=[Depends(require_hr_or_admin_user)],
+)
 async def get_session_review(
     session_id: str,
     db: Annotated[AsyncSession, Depends(get_db)],
@@ -181,7 +222,11 @@ async def get_session_review(
         raise HTTPException(status_code=404, detail=str(exc)) from exc
 
 
-@router.post("/sessions/{session_id}/runtime-events", status_code=204)
+@router.post(
+    "/sessions/{session_id}/runtime-events",
+    status_code=204,
+    dependencies=[Depends(require_worker_callback_secret)],
+)
 async def append_runtime_event(
     session_id: str,
     payload: InterviewRuntimeEventRequest,
@@ -194,7 +239,11 @@ async def append_runtime_event(
         raise HTTPException(status_code=404, detail=str(exc)) from exc
 
 
-@router.post("/sessions/{session_id}/expire-reconnect", status_code=204)
+@router.post(
+    "/sessions/{session_id}/expire-reconnect",
+    status_code=204,
+    dependencies=[Depends(require_worker_callback_secret)],
+)
 async def expire_reconnect(
     session_id: str,
     db: Annotated[AsyncSession, Depends(get_db)],
@@ -222,7 +271,11 @@ async def submit_session_feedback(
         raise HTTPException(status_code=status_code, detail=message) from exc
 
 
-@router.get("/sessions/{session_id}/feedback", response_model=InterviewFeedbackResponse | None)
+@router.get(
+    "/sessions/{session_id}/feedback",
+    response_model=InterviewFeedbackResponse | None,
+    dependencies=[Depends(require_hr_or_admin_user)],
+)
 async def get_session_feedback(
     session_id: str,
     db: Annotated[AsyncSession, Depends(get_db)],
@@ -231,7 +284,11 @@ async def get_session_feedback(
     return await service.get_feedback(session_id)
 
 
-@router.get("/jd/{jd_id}/feedback-summary", response_model=InterviewFeedbackSummaryResponse)
+@router.get(
+    "/jd/{jd_id}/feedback-summary",
+    response_model=InterviewFeedbackSummaryResponse,
+    dependencies=[Depends(require_hr_or_admin_user)],
+)
 async def get_jd_feedback_summary(
     jd_id: str,
     db: Annotated[AsyncSession, Depends(get_db)],
@@ -240,7 +297,11 @@ async def get_jd_feedback_summary(
     return await service.get_feedback_summary(jd_id)
 
 
-@router.get("/jd/{jd_id}/feedback-policy", response_model=InterviewFeedbackPolicyCollectionResponse)
+@router.get(
+    "/jd/{jd_id}/feedback-policy",
+    response_model=InterviewFeedbackPolicyCollectionResponse,
+    dependencies=[Depends(require_hr_or_admin_user)],
+)
 async def get_jd_feedback_policy(
     jd_id: str,
     db: Annotated[AsyncSession, Depends(get_db)],
@@ -287,17 +348,16 @@ async def reject_jd_feedback_policy(
         raise HTTPException(status_code=404, detail=str(exc)) from exc
 
 
-@router.post("/sessions/{session_id}/knowledge-query", response_model=JDCompanyKnowledgeQueryResponse)
+@router.post(
+    "/sessions/{session_id}/knowledge-query",
+    response_model=JDCompanyKnowledgeQueryResponse,
+    dependencies=[Depends(require_worker_callback_secret)],
+)
 async def query_session_company_knowledge(
     session_id: str,
     payload: JDCompanyKnowledgeQueryRequest,
     db: Annotated[AsyncSession, Depends(get_db)],
-    worker_callback_secret: Annotated[
-        str | None,
-        Header(alias="X-Worker-Callback-Secret"),
-    ] = None,
 ) -> JDCompanyKnowledgeQueryResponse:
-    _validate_worker_secret(worker_callback_secret)
     session_service = InterviewSessionService(db)
     company_service = CompanyKnowledgeService(db_session=db)
     try:
