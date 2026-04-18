@@ -85,7 +85,7 @@ class WorkerService:
 
 config = WorkerConfig(
     backend_base_url=os.getenv("BACKEND_BASE_URL", "http://localhost:8000"),
-    backend_callback_secret=os.getenv("BACKEND_CALLBACK_SECRET", "change-me"),
+    backend_callback_secret=os.getenv("BACKEND_CALLBACK_SECRET", ""),
     gemini_api_key=os.getenv("GEMINI_API_KEY", ""),
     gemini_model=os.getenv(
         "GEMINI_LIVE_MODEL",
