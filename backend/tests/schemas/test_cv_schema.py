@@ -7,7 +7,7 @@ import pytest
 from pydantic import ValidationError
 from sqlalchemy import JSON
 
-from src.config import Settings
+from src.config import REPO_ROOT, Settings
 from src.models import BackgroundJob, CandidateDocument, CandidateProfile, CandidateScreening
 from src.schemas.cv import (
     AuditMetadata,
@@ -26,7 +26,44 @@ def test_cv_settings_expose_upload_path_from_directory() -> None:
     settings = Settings.model_construct(cv_upload_dir="storage/custom_cv_uploads")
 
     assert settings.cv_upload_dir == "storage/custom_cv_uploads"
-    assert settings.cv_upload_path == Path("storage/custom_cv_uploads")
+    assert settings.cv_upload_path == REPO_ROOT / "storage/custom_cv_uploads"
+
+
+def test_cv_settings_resolve_relative_upload_paths_from_repo_root() -> None:
+    """Resolve relative upload directories against the repository root."""
+    settings = Settings.model_validate(
+        {
+            "jd_upload_dir": "storage/custom_jd_uploads",
+            "company_doc_upload_dir": "storage/custom_company_docs",
+            "cv_upload_dir": "storage/custom_cv_uploads",
+        }
+    )
+
+    assert settings.jd_upload_path == REPO_ROOT / "storage/custom_jd_uploads"
+    assert settings.company_doc_upload_path == REPO_ROOT / "storage/custom_company_docs"
+    assert settings.cv_upload_path == REPO_ROOT / "storage/custom_cv_uploads"
+
+
+def test_settings_derive_local_runtime_secrets_without_placeholder_defaults() -> None:
+    """Avoid shipping placeholder runtime secrets in local environments."""
+    settings = Settings.model_validate({"app_env": "local"})
+
+    assert settings.jwt_secret_key
+    assert settings.worker_callback_secret
+    assert settings.jwt_secret_key != "change-this-in-production"
+    assert settings.worker_callback_secret != "change-me"
+
+
+def test_settings_require_explicit_runtime_secrets_outside_local_env() -> None:
+    """Reject production-like environments that omit runtime secrets."""
+    with pytest.raises(ValidationError):
+        Settings.model_validate(
+            {
+                "app_env": "production",
+                "jwt_secret_key": "",
+                "worker_callback_secret": "",
+            }
+        )
 
 
 def test_candidate_profile_columns_enforce_task_1_contract() -> None:
@@ -86,8 +123,24 @@ def test_dev_script_starts_api_and_worker() -> None:
     script_text = script_path.read_text()
 
     assert "set -euo pipefail" in script_text
+    assert 'repo_root="$(cd "$script_dir/../../.." && pwd)"' in script_text
     assert "uv run uvicorn src.main:app --host 0.0.0.0 --port 8000" in script_text
     assert "uv run python -m src.scripts.run_background_jobs" in script_text
+    assert "/home/eddiesngu/Desktop/Dang/interviewx" not in script_text
+
+
+def test_interview_worker_scripts_derive_repo_root_without_local_machine_paths() -> None:
+    """Keep interview worker shell scripts portable across machines."""
+    script_names = (
+        "src/scripts/run_interview_worker_service.sh",
+        "src/scripts/run_local_interview_worker.sh",
+        "src/scripts/launch_interview_worker.sh",
+    )
+
+    for script_name in script_names:
+        script_text = Path(script_name).read_text()
+        assert 'repo_root="$(cd "$script_dir/../../.." && pwd)"' in script_text
+        assert "/home/eddiesngu/Desktop/Dang/interviewx" not in script_text
 
 
 def test_cv_model_relationship_names_match_task_1_contract() -> None:
