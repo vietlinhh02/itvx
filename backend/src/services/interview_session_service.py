@@ -1,36 +1,38 @@
-from collections.abc import Mapping
+import asyncio
+import logging
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
-import logging
+from typing import Protocol, cast
 
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from src.config import settings
 from src.models.background_job import BackgroundJob, BackgroundJobStatus, BackgroundJobType
-from src.models.cv import CandidateScreening
-from src.models.jd import JDDocument
+from src.models.cv import CandidateProfile, CandidateScreening
 from src.models.interview import InterviewRuntimeEvent, InterviewSession, InterviewTurn
+from src.models.jd import JDDocument
 from src.schemas.interview import (
+    CandidateJoinPreviewResponse,
     CandidateJoinRequest,
     CandidateJoinResponse,
     CompleteInterviewRequest,
     GenerateInterviewQuestionsRequest,
     GenerateInterviewQuestionsResponse,
+    InterviewCompetencyPlan,
     InterviewCompetencyPolicyOverride,
-    InterviewFeedbackPolicyPayload,
     InterviewPlanEvent,
     InterviewPlanPayload,
-    InterviewPolicySummaryPayload,
+    InterviewPolicyThresholds,
     InterviewQuestion,
     InterviewQuestionCandidate,
     InterviewRuntimeEventResponse,
     InterviewSchedulePayload,
-    InterviewSessionCompetencyAssessment,
+    InterviewSemanticAnswerEvaluation,
     InterviewSessionDetailResponse,
     InterviewSessionReviewResponse,
     InterviewSessionRuntimeStateResponse,
-    InterviewPolicyThresholds,
     ProposeInterviewScheduleRequest,
     PublishInterviewRequest,
     PublishInterviewResponse,
@@ -44,14 +46,44 @@ from src.services.datetime_utils import (
     parse_client_datetime_to_utc,
     to_vietnam_isoformat,
 )
+from src.services.interview_answer_evaluator_service import InterviewAnswerEvaluatorService
 from src.services.interview_feedback_service import InterviewFeedbackService
 from src.services.interview_plan_service import InterviewPlanService
-from src.services.interview_worker_launcher import InterviewWorkerLauncher
 from src.services.interview_summary_service import InterviewSummaryService
+from src.services.interview_worker_launcher import InterviewWorkerLauncher
 from src.services.livekit_service import LiveKitService
 
-
 logger = logging.getLogger(__name__)
+
+
+def _as_object_mapping(value: object) -> Mapping[str, object] | None:
+    if not isinstance(value, Mapping):
+        return None
+    return cast(Mapping[str, object], value)
+
+
+def _as_object_dict(value: object) -> dict[str, object] | None:
+    mapping = _as_object_mapping(value)
+    return dict(mapping) if mapping is not None else None
+
+
+def _as_object_list(value: object) -> list[object] | None:
+    if not isinstance(value, list):
+        return None
+    return cast(list[object], value)
+
+
+class SemanticAnswerEvaluator(Protocol):
+    async def evaluate(
+        self,
+        *,
+        plan_payload: Mapping[str, object],
+        current_question: Mapping[str, object],
+        current_competency: Mapping[str, object] | None,
+        answer_text: str,
+        recent_plan_events: Sequence[Mapping[str, object]],
+        transcript_context: Sequence[Mapping[str, object]],
+    ) -> InterviewSemanticAnswerEvaluation: ...
 
 
 @dataclass(slots=True)
@@ -72,6 +104,7 @@ class AnswerEvaluation:
     decision_rule: str
     evidence_excerpt: BilingualText
     adaptive_question_type: str | None = None
+    semantic_evaluation: InterviewSemanticAnswerEvaluation | None = None
 
 
 class InterviewSessionService:
@@ -80,15 +113,53 @@ class InterviewSessionService:
         db_session: AsyncSession,
         worker_launcher: InterviewWorkerLauncher | None = None,
         plan_service: InterviewPlanService | None = None,
+        semantic_evaluator: SemanticAnswerEvaluator | None = None,
     ) -> None:
-        self._db_session = db_session
-        self._livekit = LiveKitService()
-        self._worker_launcher = worker_launcher or InterviewWorkerLauncher(
+        self._db_session: AsyncSession = db_session
+        self._livekit: LiveKitService = LiveKitService()
+        self._worker_launcher: InterviewWorkerLauncher = worker_launcher or InterviewWorkerLauncher(
             settings.interview_worker_service_url,
             settings.interview_worker_dispatch_timeout_seconds,
         )
-        self._plan_service = plan_service or InterviewPlanService()
-        self._feedback_service = InterviewFeedbackService(db_session)
+        self._plan_service: InterviewPlanService = plan_service or InterviewPlanService()
+        self._semantic_evaluator: SemanticAnswerEvaluator = (
+            semantic_evaluator or InterviewAnswerEvaluatorService()
+        )
+        self._feedback_service: InterviewFeedbackService = InterviewFeedbackService(db_session)
+
+    @property
+    def livekit_service(self) -> LiveKitService:
+        return self._livekit
+
+    async def _delete_room_in_background(self, session_id: str, room_name: str) -> None:
+        try:
+            await self._livekit.delete_room(room_name)
+        except Exception:
+            logger.exception(
+                "failed to delete LiveKit room for session_id=%s room_name=%s",
+                session_id,
+                room_name,
+            )
+
+    async def _dispatch_worker_for_session(
+        self,
+        session: InterviewSession,
+        *,
+        jd_id: str,
+    ):
+        worker_identity = session.worker_identity or self._livekit.create_worker_identity(session.id)
+        worker_token = self._livekit.create_worker_token(
+            room_name=session.livekit_room_name,
+            identity=worker_identity,
+        )
+        session.worker_identity = worker_identity
+        return await self._worker_launcher.launch(
+            session_id=session.id,
+            room_name=session.livekit_room_name,
+            opening_question=session.opening_question,
+            worker_token=worker_token,
+            jd_id=jd_id,
+        )
 
     async def generate_questions(
         self,
@@ -132,9 +203,11 @@ class InterviewSessionService:
             raise ValueError("Approved interview questions are required")
 
         existing_session = await self._db_session.scalar(
-            select(InterviewSession).where(InterviewSession.candidate_screening_id == screening.id)
+            select(InterviewSession)
+            .where(InterviewSession.candidate_screening_id == screening.id)
+            .order_by(InterviewSession.created_at.desc())
         )
-        if existing_session is not None:
+        if existing_session is not None and existing_session.status not in {"finishing", "completed"}:
             return PublishInterviewResponse(
                 session_id=existing_session.id,
                 share_link=f"{settings.next_public_app_url}/interviews/join/{existing_session.share_token}",
@@ -149,7 +222,12 @@ class InterviewSessionService:
         if jd_document is None:
             raise ValueError("JD analysis not found")
 
-        room_name = self._livekit.build_room_name(screening.id)
+        candidate_profile = await self._db_session.scalar(
+            select(CandidateProfile).where(CandidateProfile.id == screening.candidate_profile_id)
+        )
+        room_name = self._livekit.build_room_name(
+            self._extract_candidate_name(candidate_profile.profile_payload if candidate_profile is not None else {})
+        )
         share_token = self._livekit.build_share_token()
         worker_dispatch_token = self._livekit.build_worker_dispatch_token()
         plan_payload = await self._build_session_plan_payload(
@@ -174,20 +252,7 @@ class InterviewSessionService:
         self._db_session.add(session)
         await self._db_session.commit()
         await self._db_session.refresh(session)
-        worker_identity = self._livekit.create_worker_identity(session.id)
-        worker_token = self._livekit.create_worker_token(
-            room_name=room_name,
-            identity=worker_identity,
-        )
-        session.worker_identity = worker_identity
-
-        dispatch = await self._worker_launcher.launch(
-            session_id=session.id,
-            room_name=room_name,
-            opening_question=session.opening_question,
-            worker_token=worker_token,
-            jd_id=jd_document.id,
-        )
+        dispatch = await self._dispatch_worker_for_session(session, jd_id=jd_document.id)
         session.worker_status = "queued"
         self._db_session.add(
             InterviewRuntimeEvent(
@@ -257,8 +322,31 @@ class InterviewSessionService:
         session.candidate_identity = candidate_identity
         session.disconnect_deadline_at = None
         session.last_disconnect_reason = None
-        if session.worker_status == "waiting_for_candidate":
-            session.worker_status = "responding" if session.started_at is not None else "room_connected"
+        should_dispatch_worker = previous_status == "reconnecting" or session.worker_status == "waiting_for_candidate"
+        if should_dispatch_worker:
+            screening = await self._db_session.scalar(
+                select(CandidateScreening).where(CandidateScreening.id == session.candidate_screening_id)
+            )
+            if screening is None:
+                raise ValueError("CV screening not found")
+            dispatch = await self._dispatch_worker_for_session(session, jd_id=screening.jd_document_id)
+            if dispatch.status == "queued":
+                session.worker_status = "queued"
+            self._db_session.add(
+                InterviewRuntimeEvent(
+                    interview_session_id=session.id,
+                    event_type="worker.dispatch_requested",
+                    event_source="backend",
+                    session_status=session.status,
+                    worker_status=session.worker_status,
+                    provider_status=session.provider_status,
+                    payload={
+                        "accepted": dispatch.accepted,
+                        "status": dispatch.status,
+                        "trigger": "candidate.rejoined" if previous_status == "reconnecting" else "candidate.join_requested",
+                    },
+                )
+            )
 
         event_type = "candidate.rejoined" if previous_status == "reconnecting" else "candidate.join_requested"
         self._db_session.add(
@@ -282,6 +370,21 @@ class InterviewSessionService:
             room_name=session.livekit_room_name,
             participant_token=participant_token,
             candidate_identity=candidate_identity,
+            schedule=self._build_schedule_payload(session),
+        )
+
+    async def get_join_preview(self, share_token: str) -> CandidateJoinPreviewResponse:
+        session = await self._db_session.scalar(
+            select(InterviewSession).where(InterviewSession.share_token == share_token)
+        )
+        if session is None:
+            raise ValueError("Interview session not found")
+        if session.summary_payload or session.status in {"finishing", "completed"}:
+            raise ValueError("Interview session has ended")
+
+        return CandidateJoinPreviewResponse(
+            session_id=session.id,
+            status=session.status,
             schedule=self._build_schedule_payload(session),
         )
 
@@ -311,7 +414,7 @@ class InterviewSessionService:
             )
         )
 
-        adaptive_event = self._build_adaptive_plan_event(session, payload)
+        adaptive_event = await self._build_adaptive_plan_event(session, payload)
         if adaptive_event is not None:
             session.plan_payload = self._apply_adaptive_plan_update(session.plan_payload, adaptive_event)
             self._db_session.add(
@@ -330,6 +433,9 @@ class InterviewSessionService:
                         else None,
                         "confidence": adaptive_event.confidence,
                         "question_index": adaptive_event.question_index,
+                        "semantic_evaluation": adaptive_event.semantic_evaluation.model_dump(mode="json")
+                        if adaptive_event.semantic_evaluation is not None
+                        else None,
                     },
                 )
             )
@@ -371,6 +477,7 @@ class InterviewSessionService:
         *,
         summary_generator: InterviewSummaryService | None = None,
     ) -> None:
+        _ = summary_generator
         session = await self._db_session.scalar(
             select(InterviewSession).where(InterviewSession.id == session_id)
         )
@@ -388,6 +495,7 @@ class InterviewSessionService:
         session.last_disconnect_reason = payload.reason
         session.last_error_code = None
         session.last_error_message = None
+        session.share_token = self._livekit.build_share_token()
         self._db_session.add(
             BackgroundJob(
                 job_type="interview_summary",
@@ -398,10 +506,10 @@ class InterviewSessionService:
             )
         )
         await self._db_session.commit()
-        try:
-            await self._livekit.delete_room(session.livekit_room_name)
-        except Exception:
-            logger.exception("failed to delete LiveKit room for session_id=%s", session.id)
+        _ = asyncio.create_task(
+            self._delete_room_in_background(session.id, session.livekit_room_name),
+            name=f"interview-room-delete:{session.id}",
+        )
 
     async def run_summary_job(
         self,
@@ -586,11 +694,14 @@ class InterviewSessionService:
 
     async def get_runtime_state(self, session_id: str) -> InterviewSessionRuntimeStateResponse:
         detail = await self.get_session_detail(session_id)
+        decision_status = detail.plan.interview_decision_status if detail.plan is not None else None
         current_question = (
             detail.plan.questions[detail.current_question_index]
             if detail.plan is not None and detail.plan.questions and detail.current_question_index < len(detail.plan.questions)
             else None
         )
+        if decision_status == "ready_to_wrap":
+            current_question = None
         last_plan_event = detail.plan.plan_events[-1] if detail.plan is not None and detail.plan.plan_events else None
         return InterviewSessionRuntimeStateResponse(
             session_id=detail.session_id,
@@ -600,9 +711,8 @@ class InterviewSessionService:
             current_question_index=detail.current_question_index,
             current_question=current_question,
             next_intended_step=detail.plan.next_intended_step if detail.plan is not None else None,
-            interview_decision_status=(
-                detail.plan.interview_decision_status if detail.plan is not None else None
-            ),
+            interview_decision_status=decision_status,
+            needs_hr_review=self._plan_needs_hr_review(detail.plan),
             current_phase=detail.plan.current_phase if detail.plan is not None else None,
             last_plan_event=last_plan_event,
         )
@@ -620,7 +730,7 @@ class InterviewSessionService:
             status=detail.status,
             summary_payload=session.summary_payload,
             transcript_turns=detail.transcript_turns,
-            ai_competency_assessments=self._feedback_service._derive_ai_competency_assessments(session),
+            ai_competency_assessments=self._feedback_service._derive_ai_competency_assessments(session),  # pyright: ignore[reportPrivateUsage]
         )
 
     async def get_jd_id_for_session(self, session_id: str) -> str:
@@ -747,6 +857,35 @@ class InterviewSessionService:
         completion_reason = job.payload.get("completion_reason")
         return completion_reason if isinstance(completion_reason, str) and completion_reason else "completed"
 
+    def _extract_candidate_name(self, profile_payload: object) -> str | None:
+        profile = _as_object_mapping(profile_payload)
+        if profile is None:
+            return None
+
+        candidate_summary = _as_object_mapping(profile.get("candidate_summary"))
+        if candidate_summary is None:
+            return None
+
+        full_name = candidate_summary.get("full_name")
+        return full_name.strip() if isinstance(full_name, str) and full_name.strip() else None
+
+    def _runtime_decision_status(self, *, needs_hr_review: bool, default_status: str) -> str:
+        if default_status == "ready_to_wrap":
+            return "ready_to_wrap"
+        return "continue_with_hr_flag" if needs_hr_review else default_status
+
+    def _plan_needs_hr_review(self, plan: InterviewPlanPayload | None) -> bool:
+        if plan is None:
+            return False
+        if plan.interview_decision_status in {"continue_with_hr_flag", "escalate_hr"}:
+            return True
+        if any(item.status == "needs_recovery" for item in plan.competencies):
+            return True
+        return any(
+            event.semantic_evaluation is not None and event.semantic_evaluation.needs_hr_review
+            for event in plan.plan_events
+        )
+
     def _build_schedule_payload(self, session: InterviewSession) -> InterviewSchedulePayload:
         return InterviewSchedulePayload(
             scheduled_start_at=to_vietnam_isoformat(session.scheduled_start_at),
@@ -776,17 +915,14 @@ class InterviewSessionService:
             for item in plan.questions
             if item.prompt.vi.strip()
         }
-        interview_draft_payload = screening_payload.get("interview_draft")
-        interview_draft = (
-            dict(interview_draft_payload)
-            if isinstance(interview_draft_payload, Mapping)
-            else {}
-        )
+        interview_draft = _as_object_dict(screening_payload.get("interview_draft")) or {}
         generated_questions_payload = interview_draft.get("generated_questions")
         generated_questions_by_text: dict[str, dict[str, object]] = {}
-        if isinstance(generated_questions_payload, list):
-            for item in generated_questions_payload:
-                if not isinstance(item, Mapping):
+        generated_questions = _as_object_list(generated_questions_payload)
+        if generated_questions is not None:
+            for item_value in generated_questions:
+                item = _as_object_mapping(item_value)
+                if item is None:
                     continue
                 question_text = item.get("question_text")
                 if isinstance(question_text, str) and question_text.strip():
@@ -813,17 +949,20 @@ class InterviewSessionService:
                     en="Validate the approved interview signal for this session.",
                 )
             )
-            source = generated_item.get("source") if isinstance(generated_item.get("source"), str) else None
-            question_type = (
-                generated_item.get("question_type")
-                if isinstance(generated_item.get("question_type"), str)
-                else (existing_item.question_type if existing_item is not None else "planned")
-            )
-            rationale = (
-                generated_item.get("rationale")
-                if isinstance(generated_item.get("rationale"), str)
-                else (existing_item.rationale if existing_item is not None else None)
-            )
+            source: str | None = None
+            generated_source = generated_item.get("source")
+            if isinstance(generated_source, str):
+                source = generated_source
+
+            question_type: str | None = existing_item.question_type if existing_item is not None else "planned"
+            generated_question_type = generated_item.get("question_type")
+            if isinstance(generated_question_type, str):
+                question_type = generated_question_type
+
+            rationale: str | None = existing_item.rationale if existing_item is not None else None
+            generated_rationale = generated_item.get("rationale")
+            if isinstance(generated_rationale, str):
+                rationale = generated_rationale
             priority = generated_item.get("priority")
             target_competency_payload = generated_item.get("target_competency")
             selection_reason_payload = generated_item.get("selection_reason")
@@ -890,7 +1029,7 @@ class InterviewSessionService:
         except ValueError:
             return None
 
-    def _build_adaptive_plan_event(
+    async def _build_adaptive_plan_event(
         self,
         session: InterviewSession,
         payload: TranscriptTurnRequest,
@@ -905,11 +1044,16 @@ class InterviewSessionService:
             plan=plan,
             payload=payload,
         )
-        evaluation = self._evaluate_answer(
+        transcript_context = await self._build_transcript_context(
+            session_id=session.id,
+            payload=payload,
+        )
+        evaluation = await self._evaluate_answer(
             plan=plan,
             current_competency_index=current_competency_index,
             current_question=current_question,
             answer_text=payload.transcript_text,
+            transcript_context=transcript_context,
         )
         event_type = (
             "plan.phase_completed"
@@ -926,8 +1070,46 @@ class InterviewSessionService:
             evidence_excerpt=evaluation.evidence_excerpt,
             decision_rule=evaluation.decision_rule,
             next_question_type=evaluation.adaptive_question_type,
+            semantic_evaluation=evaluation.semantic_evaluation,
             created_at=datetime.now(UTC).isoformat(),
         )
+
+    async def _build_transcript_context(
+        self,
+        *,
+        session_id: str,
+        payload: TranscriptTurnRequest,
+    ) -> list[dict[str, object]]:
+        turns = await self.list_turns(session_id)
+        prior_turns = [
+            turn
+            for turn in turns
+            if (
+                payload.provider_event_id is None
+                or turn.provider_event_id != payload.provider_event_id
+            )
+            and not (
+                turn.sequence_number == payload.sequence_number
+                and turn.speaker == payload.speaker
+                and turn.transcript_text == payload.transcript_text
+            )
+        ]
+        transcript_context: list[dict[str, object]] = [
+            {
+                "speaker": turn.speaker,
+                "sequence_number": turn.sequence_number,
+                "transcript_text": turn.transcript_text,
+            }
+            for turn in prior_turns[-4:]
+        ]
+        transcript_context.append(
+            {
+                "speaker": payload.speaker,
+                "sequence_number": payload.sequence_number,
+                "transcript_text": payload.transcript_text,
+            }
+        )
+        return transcript_context
 
     def _get_current_plan_context(
         self,
@@ -935,24 +1117,356 @@ class InterviewSessionService:
         plan: InterviewPlanPayload,
         payload: TranscriptTurnRequest,
     ) -> tuple[InterviewQuestion, int]:
-        competency_index = min(
+        fallback_competency_index = min(
             plan.current_competency_index,
             max(len(plan.competencies) - 1, 0),
         )
-        if plan.competencies:
-            current_competency = plan.competencies[competency_index].name.en.casefold()
-            for question in plan.questions:
-                target_name = (
-                    question.target_competency.en.casefold()
-                    if question.target_competency is not None
-                    else question.dimension_name.en.casefold()
-                )
-                if target_name == current_competency:
-                    return question, competency_index
         current_index = min(payload.sequence_number // 2, len(plan.questions) - 1)
-        return plan.questions[current_index], competency_index
+        current_question = plan.questions[current_index]
+        return current_question, self._get_competency_index_for_question(
+            plan=plan,
+            question=current_question,
+            fallback_index=fallback_competency_index,
+        )
 
-    def _evaluate_answer(
+    def _get_competency_index_for_question(
+        self,
+        *,
+        plan: InterviewPlanPayload,
+        question: InterviewQuestion,
+        fallback_index: int,
+    ) -> int:
+        current_target_name = (
+            question.target_competency.en.casefold()
+            if question.target_competency is not None
+            else question.dimension_name.en.casefold()
+        )
+
+        for competency_index, competency in enumerate(plan.competencies):
+            if competency.name.en.casefold() == current_target_name:
+                return competency_index
+
+        return fallback_index
+
+    async def _evaluate_answer(
+        self,
+        *,
+        plan: InterviewPlanPayload,
+        current_competency_index: int,
+        current_question: InterviewQuestion,
+        answer_text: str,
+        transcript_context: Sequence[Mapping[str, object]],
+    ) -> AnswerEvaluation:
+        semantic_evaluation = await self._evaluate_answer_semantically(
+            plan=plan,
+            current_competency_index=current_competency_index,
+            current_question=current_question,
+            answer_text=answer_text,
+            transcript_context=transcript_context,
+        )
+        if semantic_evaluation is not None:
+            return semantic_evaluation
+        return self._evaluate_answer_heuristically(
+            plan=plan,
+            current_competency_index=current_competency_index,
+            current_question=current_question,
+            answer_text=answer_text,
+        )
+
+    async def _evaluate_answer_semantically(
+        self,
+        *,
+        plan: InterviewPlanPayload,
+        current_competency_index: int,
+        current_question: InterviewQuestion,
+        answer_text: str,
+        transcript_context: Sequence[Mapping[str, object]],
+    ) -> AnswerEvaluation | None:
+        current_competency = (
+            plan.competencies[current_competency_index]
+            if current_competency_index < len(plan.competencies)
+            else None
+        )
+        try:
+            semantic = await self._semantic_evaluator.evaluate(
+                plan_payload=plan.model_dump(mode="json"),
+                current_question=current_question.model_dump(mode="json"),
+                current_competency=current_competency.model_dump(mode="json")
+                if current_competency is not None
+                else None,
+                answer_text=answer_text,
+                recent_plan_events=[
+                    event.model_dump(mode="json")
+                    for event in plan.plan_events[-4:]
+                ],
+                transcript_context=transcript_context,
+            )
+        except Exception:
+            logger.debug("semantic answer evaluation unavailable; falling back to heuristics", exc_info=True)
+            return None
+
+        return self._translate_semantic_evaluation(
+            plan=plan,
+            current_competency_index=current_competency_index,
+            current_question=current_question,
+            answer_text=answer_text,
+            semantic=semantic,
+        )
+
+    def _translate_semantic_evaluation(
+        self,
+        *,
+        plan: InterviewPlanPayload,
+        current_competency_index: int,
+        current_question: InterviewQuestion,
+        answer_text: str,
+        semantic: InterviewSemanticAnswerEvaluation,
+    ) -> AnswerEvaluation | None:
+        thresholds = (
+            plan.active_policy.global_thresholds
+            if plan.active_policy is not None
+            else InterviewPolicyThresholds()
+        )
+        default_threshold = thresholds.semantic_default_confidence_threshold
+        move_on_threshold = thresholds.semantic_move_on_confidence_threshold
+        recovery_threshold = thresholds.semantic_recovery_confidence_threshold
+        wrap_up_threshold = max(
+            thresholds.wrap_up_confidence_threshold,
+            thresholds.semantic_default_confidence_threshold,
+        )
+        confidence_gate = {
+            "continue": default_threshold,
+            "clarify": default_threshold,
+            "move_on": move_on_threshold,
+            "recovery": recovery_threshold,
+            "wrap_up": wrap_up_threshold,
+        }
+        if semantic.confidence < confidence_gate[semantic.recommended_action]:
+            return None
+
+        evidence_excerpt = BilingualText(
+            vi=answer_text.strip()[:220],
+            en=answer_text.strip()[:220],
+        )
+        competency = (
+            plan.competencies[current_competency_index]
+            if current_competency_index < len(plan.competencies)
+            else None
+        )
+        current_coverage = competency.current_coverage if competency is not None else 0.0
+        has_more_competencies = current_competency_index < max(len(plan.competencies) - 1, 0)
+        next_competency_name = (
+            plan.competencies[current_competency_index + 1].name
+            if has_more_competencies and current_competency_index + 1 < len(plan.competencies)
+            else current_question.target_competency or current_question.dimension_name
+        )
+        coverage_gain_map = {
+            "strong": 0.36,
+            "partial": 0.22,
+            "low_signal": 0.06,
+            "off_topic": 0.0,
+            "explicit_gap": 0.0,
+            "inconsistent": 0.08,
+        }
+        coverage_gain = coverage_gain_map[semantic.answer_quality]
+        if semantic.evidence_progress == "unchanged":
+            coverage_gain = min(coverage_gain, 0.08)
+        if semantic.evidence_progress == "regressed":
+            coverage_gain = 0.0
+        evidence_increment = (
+            1
+            if semantic.evidence_progress == "improved"
+            and semantic.answer_quality in {"strong", "partial"}
+            else 0
+        )
+
+        if semantic.recommended_action == "recovery":
+            return AnswerEvaluation(
+                coverage_gain=max(coverage_gain, 0.12),
+                evidence_increment=0,
+                is_generic=False,
+                has_inconsistency=True,
+                should_advance=False,
+                should_wrap_up=False,
+                should_escalate=semantic.needs_hr_review,
+                chosen_action="ask_recovery",
+                confidence=semantic.confidence,
+                reason=semantic.reason,
+                next_intended_step=BilingualText(
+                    vi="Làm rõ timeline, vai trò sở hữu và kết quả thực tế trước khi tiếp tục.",
+                    en="Clarify the timeline, ownership, and actual outcome before continuing.",
+                ),
+                decision_status=self._runtime_decision_status(
+                    needs_hr_review=semantic.needs_hr_review,
+                    default_status="adjust",
+                ),
+                next_phase=plan.current_phase or "competency_validation",
+                decision_rule="semantic_answer_recovery",
+                evidence_excerpt=evidence_excerpt,
+                adaptive_question_type="recovery",
+                semantic_evaluation=semantic,
+            )
+
+        if semantic.recommended_action == "clarify":
+            return AnswerEvaluation(
+                coverage_gain=max(coverage_gain, 0.08),
+                evidence_increment=0,
+                is_generic=semantic.answer_quality in {"low_signal", "off_topic"},
+                has_inconsistency=False,
+                should_advance=False,
+                should_wrap_up=False,
+                should_escalate=semantic.needs_hr_review,
+                chosen_action="ask_clarification",
+                confidence=semantic.confidence,
+                reason=semantic.reason,
+                next_intended_step=BilingualText(
+                    vi="Yêu cầu ứng viên bổ sung bối cảnh, hành động và kết quả đo được.",
+                    en="Ask the candidate to add context, actions, and measurable outcomes.",
+                ),
+                decision_status=self._runtime_decision_status(
+                    needs_hr_review=semantic.needs_hr_review,
+                    default_status="adjust",
+                ),
+                next_phase=plan.current_phase or "competency_validation",
+                decision_rule="semantic_answer_clarify",
+                evidence_excerpt=evidence_excerpt,
+                adaptive_question_type="clarification",
+                semantic_evaluation=semantic,
+            )
+
+        if semantic.recommended_action == "wrap_up":
+            return AnswerEvaluation(
+                coverage_gain=max(coverage_gain, 1.0 - current_coverage),
+                evidence_increment=max(1, evidence_increment),
+                is_generic=False,
+                has_inconsistency=False,
+                should_advance=True,
+                should_wrap_up=True,
+                should_escalate=semantic.needs_hr_review,
+                chosen_action="prepare_wrap_up",
+                confidence=semantic.confidence,
+                reason=semantic.reason,
+                next_intended_step=BilingualText(
+                    vi="Tóm tắt tín hiệu chính và kết thúc buổi phỏng vấn.",
+                    en="Summarize the key signals and close the interview.",
+                ),
+                decision_status="ready_to_wrap",
+                next_phase="wrap_up",
+                decision_rule="semantic_answer_wrap_up",
+                evidence_excerpt=evidence_excerpt,
+                semantic_evaluation=semantic,
+            )
+
+        if semantic.recommended_action == "move_on":
+            resolved_move_on = (
+                semantic.answer_quality in {"strong", "partial"}
+                and semantic.evidence_progress == "improved"
+            )
+            if resolved_move_on:
+                if has_more_competencies:
+                    return AnswerEvaluation(
+                        coverage_gain=max(coverage_gain, 0.24),
+                        evidence_increment=max(1, evidence_increment),
+                        is_generic=False,
+                        has_inconsistency=False,
+                        should_advance=True,
+                        should_wrap_up=False,
+                        should_escalate=semantic.needs_hr_review,
+                        chosen_action="advance_to_next_competency",
+                        confidence=semantic.confidence,
+                        reason=semantic.reason,
+                        next_intended_step=BilingualText(
+                            vi=f"Chuyển sang xác minh năng lực tiếp theo: {next_competency_name.vi}.",
+                            en=f"Move on to validate the next competency: {next_competency_name.en}.",
+                        ),
+                        decision_status=self._runtime_decision_status(
+                            needs_hr_review=semantic.needs_hr_review,
+                            default_status="continue",
+                        ),
+                        next_phase="deep_dive",
+                        decision_rule="semantic_answer_move_on",
+                        evidence_excerpt=evidence_excerpt,
+                        semantic_evaluation=semantic,
+                    )
+                return AnswerEvaluation(
+                    coverage_gain=max(coverage_gain, 1.0 - current_coverage),
+                    evidence_increment=max(1, evidence_increment),
+                    is_generic=False,
+                    has_inconsistency=False,
+                    should_advance=True,
+                    should_wrap_up=True,
+                    should_escalate=semantic.needs_hr_review,
+                    chosen_action="prepare_wrap_up",
+                    confidence=semantic.confidence,
+                    reason=semantic.reason,
+                    next_intended_step=BilingualText(
+                        vi="Tóm tắt tín hiệu chính và kết thúc buổi phỏng vấn.",
+                        en="Summarize the key signals and close the interview.",
+                    ),
+                    decision_status="ready_to_wrap",
+                    next_phase="wrap_up",
+                    decision_rule="semantic_answer_move_on",
+                    evidence_excerpt=evidence_excerpt,
+                    semantic_evaluation=semantic,
+                )
+            return AnswerEvaluation(
+                coverage_gain=0.0,
+                evidence_increment=0,
+                is_generic=semantic.answer_quality in {"low_signal", "off_topic"},
+                has_inconsistency=False,
+                should_advance=has_more_competencies,
+                should_wrap_up=not has_more_competencies,
+                should_escalate=semantic.needs_hr_review,
+                chosen_action="move_on_from_unresolved_competency",
+                confidence=semantic.confidence,
+                reason=semantic.reason,
+                next_intended_step=(
+                    BilingualText(
+                        vi=f"Chuyển sang xác minh năng lực tiếp theo: {next_competency_name.vi}.",
+                        en=f"Move on to validate the next competency: {next_competency_name.en}.",
+                    )
+                    if has_more_competencies
+                    else BilingualText(
+                        vi="Tổng kết các khoảng trống bằng chứng còn lại rồi kết thúc buổi phỏng vấn.",
+                        en="Summarize the remaining evidence gaps and close the interview.",
+                    )
+                ),
+                decision_status=self._runtime_decision_status(
+                    needs_hr_review=semantic.needs_hr_review,
+                    default_status="adjust" if has_more_competencies else "ready_to_wrap",
+                ),
+                next_phase="deep_dive" if has_more_competencies else "wrap_up",
+                decision_rule="semantic_answer_move_on",
+                evidence_excerpt=evidence_excerpt,
+                semantic_evaluation=semantic,
+            )
+
+        return AnswerEvaluation(
+            coverage_gain=max(coverage_gain, 0.14),
+            evidence_increment=evidence_increment,
+            is_generic=semantic.answer_quality == "low_signal",
+            has_inconsistency=False,
+            should_advance=False,
+            should_wrap_up=False,
+            should_escalate=semantic.needs_hr_review,
+            chosen_action="continue_current_competency",
+            confidence=semantic.confidence,
+            reason=semantic.reason,
+            next_intended_step=BilingualText(
+                vi="Tiếp tục đào sâu năng lực hiện tại để hoàn thiện coverage.",
+                en="Keep probing the current competency to complete coverage.",
+            ),
+            decision_status=self._runtime_decision_status(
+                needs_hr_review=semantic.needs_hr_review,
+                default_status="continue",
+            ),
+            next_phase="deep_dive",
+            decision_rule="semantic_answer_continue",
+            evidence_excerpt=evidence_excerpt,
+            semantic_evaluation=semantic,
+        )
+
+    def _evaluate_answer_heuristically(
         self,
         *,
         plan: InterviewPlanPayload,
@@ -1006,6 +1520,7 @@ class InterviewSessionService:
         if competency_override is not None and competency_override.require_measurable_outcome and token_hits == 0:
             evidence_strength = max(0.0, evidence_strength - 0.12)
         is_generic = len(normalized_answer) < generic_min_length or evidence_strength < generic_threshold
+        has_capability_gap = self._has_capability_gap_signal(lowered_text)
 
         competency = (
             plan.competencies[current_competency_index]
@@ -1041,6 +1556,12 @@ class InterviewSessionService:
             len(plan.plan_events) >= thresholds.escalate_after_consecutive_adjustments
             and consecutive_adjustments >= thresholds.escalate_after_consecutive_adjustments
         )
+        has_more_competencies = current_competency_index < max(len(plan.competencies) - 1, 0)
+        clarification_attempts_for_competency = self._count_competency_adjustments(
+            plan=plan,
+            competency_name=current_question.target_competency or current_question.dimension_name,
+            chosen_actions={"ask_clarification"},
+        )
 
         if has_inconsistency:
             return AnswerEvaluation(
@@ -1050,7 +1571,7 @@ class InterviewSessionService:
                 has_inconsistency=True,
                 should_advance=False,
                 should_wrap_up=False,
-                should_escalate=should_escalate,
+                should_escalate=current_question.question_type == "recovery",
                 chosen_action="ask_recovery",
                 confidence=0.66,
                 reason=BilingualText(
@@ -1061,11 +1582,90 @@ class InterviewSessionService:
                     vi="Làm rõ timeline, vai trò sở hữu và kết quả thực tế trước khi tiếp tục.",
                     en="Clarify the timeline, ownership, and actual outcome before continuing.",
                 ),
-                decision_status="escalate_hr" if should_escalate else "adjust",
+                decision_status=self._runtime_decision_status(
+                    needs_hr_review=current_question.question_type == "recovery",
+                    default_status="adjust",
+                ),
                 next_phase=plan.current_phase or "competency_validation",
                 decision_rule="recovery_signal_detected",
                 evidence_excerpt=evidence_excerpt,
                 adaptive_question_type="recovery",
+            )
+        if has_capability_gap:
+            next_competency_name = (
+                plan.competencies[current_competency_index + 1].name
+                if has_more_competencies and current_competency_index + 1 < len(plan.competencies)
+                else current_question.target_competency or current_question.dimension_name
+            )
+            return AnswerEvaluation(
+                coverage_gain=0.0,
+                evidence_increment=0,
+                is_generic=False,
+                has_inconsistency=False,
+                should_advance=has_more_competencies,
+                should_wrap_up=not has_more_competencies,
+                should_escalate=False,
+                chosen_action="move_on_from_unresolved_competency",
+                confidence=0.78,
+                reason=BilingualText(
+                    vi="Ứng viên nói rõ chưa có kinh nghiệm với chủ đề này, nên plan ghi nhận gap và chuyển sang competency khác.",
+                    en="The candidate explicitly lacks experience with this topic, so the plan records the gap and moves on.",
+                ),
+                next_intended_step=(
+                    BilingualText(
+                        vi=f"Chuyển sang xác minh năng lực tiếp theo: {next_competency_name.vi}.",
+                        en=f"Move on to validate the next competency: {next_competency_name.en}.",
+                    )
+                    if has_more_competencies
+                    else BilingualText(
+                        vi="Tổng kết các khoảng trống bằng chứng còn lại rồi kết thúc buổi phỏng vấn.",
+                        en="Summarize the remaining evidence gaps and close the interview.",
+                    )
+                ),
+                decision_status="adjust" if has_more_competencies else "ready_to_wrap",
+                next_phase="deep_dive" if has_more_competencies else "wrap_up",
+                decision_rule="explicit_capability_gap_move_on",
+                evidence_excerpt=evidence_excerpt,
+            )
+        if (
+            is_generic
+            and clarification_attempts_for_competency
+            >= thresholds.max_clarification_turns_per_competency
+        ):
+            next_competency_name = (
+                plan.competencies[current_competency_index + 1].name
+                if has_more_competencies and current_competency_index + 1 < len(plan.competencies)
+                else current_question.target_competency or current_question.dimension_name
+            )
+            return AnswerEvaluation(
+                coverage_gain=0.0,
+                evidence_increment=0,
+                is_generic=True,
+                has_inconsistency=False,
+                should_advance=has_more_competencies,
+                should_wrap_up=not has_more_competencies,
+                should_escalate=False,
+                chosen_action="move_on_from_unresolved_competency",
+                confidence=0.74,
+                reason=BilingualText(
+                    vi="Ứng viên đã được hỏi làm rõ nhưng vẫn chưa tạo thêm bằng chứng đủ dùng, nên plan chuyển sang competency khác để tránh lặp.",
+                    en="The candidate was already asked to clarify but still did not add usable evidence, so the plan moves on to avoid looping.",
+                ),
+                next_intended_step=(
+                    BilingualText(
+                        vi=f"Chuyển sang xác minh năng lực tiếp theo: {next_competency_name.vi}.",
+                        en=f"Move on to validate the next competency: {next_competency_name.en}.",
+                    )
+                    if has_more_competencies
+                    else BilingualText(
+                        vi="Tổng kết các khoảng trống bằng chứng còn lại rồi kết thúc buổi phỏng vấn.",
+                        en="Summarize the remaining evidence gaps and close the interview.",
+                    )
+                ),
+                decision_status="adjust" if has_more_competencies else "ready_to_wrap",
+                next_phase="deep_dive" if has_more_competencies else "wrap_up",
+                decision_rule="low_signal_answer_after_clarification_move_on",
+                evidence_excerpt=evidence_excerpt,
             )
         if is_generic:
             return AnswerEvaluation(
@@ -1086,7 +1686,10 @@ class InterviewSessionService:
                     vi="Yêu cầu ứng viên bổ sung bối cảnh, hành động và kết quả đo được.",
                     en="Ask the candidate to add context, actions, and measurable outcomes.",
                 ),
-                decision_status="escalate_hr" if should_escalate else "adjust",
+                decision_status=self._runtime_decision_status(
+                    needs_hr_review=should_escalate,
+                    default_status="adjust",
+                ),
                 next_phase=plan.current_phase or "competency_validation",
                 decision_rule="generic_answer_needs_clarification",
                 evidence_excerpt=evidence_excerpt,
@@ -1184,6 +1787,44 @@ class InterviewSessionService:
         ]
         return any(marker in lowered_text for marker in recovery_markers)
 
+    def _has_capability_gap_signal(self, lowered_text: str) -> bool:
+        capability_gap_markers = [
+            "không biết",
+            "chua biet",
+            "chưa biết",
+            "không rành",
+            "chưa dùng",
+            "chua dung",
+            "chưa làm",
+            "chua lam",
+            "không làm",
+            "không có kinh nghiệm",
+            "chưa có kinh nghiệm",
+            "never used",
+            "have not used",
+            "haven't used",
+            "don't know",
+            "do not know",
+            "not familiar",
+            "no experience",
+        ]
+        return any(marker in lowered_text for marker in capability_gap_markers)
+
+    def _count_competency_adjustments(
+        self,
+        *,
+        plan: InterviewPlanPayload,
+        competency_name: BilingualText,
+        chosen_actions: set[str],
+    ) -> int:
+        return sum(
+            1
+            for event in plan.plan_events
+            if event.chosen_action in chosen_actions
+            and event.affected_competency is not None
+            and event.affected_competency.en.casefold() == competency_name.en.casefold()
+        )
+
     def _get_competency_override(
         self,
         plan: InterviewPlanPayload,
@@ -1209,7 +1850,7 @@ class InterviewSessionService:
             for item in plan.active_policy.competency_overrides
             if item.competency_name.en.strip()
         }
-        updated_competencies = []
+        updated_competencies: list[InterviewCompetencyPlan] = []
         for competency in plan.competencies:
             override = overrides.get(competency.name.en.casefold())
             if override is None:
@@ -1261,7 +1902,7 @@ class InterviewSessionService:
                 has_inconsistency=True,
                 should_advance=False,
                 should_wrap_up=False,
-                should_escalate=True,
+                should_escalate=current_question.question_type == "recovery",
                 chosen_action=event.chosen_action,
                 confidence=event.confidence or 0.66,
                 reason=event.reason,
@@ -1269,11 +1910,19 @@ class InterviewSessionService:
                     vi="Làm rõ timeline, vai trò sở hữu và kết quả thực tế trước khi tiếp tục.",
                     en="Clarify the timeline, ownership, and actual outcome before continuing.",
                 ),
-                decision_status="escalate_hr",
+                decision_status=self._runtime_decision_status(
+                    needs_hr_review=(
+                        event.semantic_evaluation.needs_hr_review
+                        if event.semantic_evaluation is not None
+                        else current_question.question_type == "recovery"
+                    ),
+                    default_status="adjust",
+                ),
                 next_phase=plan.current_phase or "competency_validation",
-                decision_rule="recovery_signal_detected",
+                decision_rule=event.decision_rule or "recovery_signal_detected",
                 evidence_excerpt=evidence_excerpt,
                 adaptive_question_type="recovery",
+                semantic_evaluation=event.semantic_evaluation,
             )
         if event.chosen_action == "ask_clarification":
             return AnswerEvaluation(
@@ -1291,11 +1940,52 @@ class InterviewSessionService:
                     vi="Yêu cầu ứng viên bổ sung bối cảnh, hành động và kết quả đo được.",
                     en="Ask the candidate to add context, actions, and measurable outcomes.",
                 ),
-                decision_status="adjust",
+                decision_status=self._runtime_decision_status(
+                    needs_hr_review=(
+                        event.semantic_evaluation is not None and event.semantic_evaluation.needs_hr_review
+                    ),
+                    default_status="adjust",
+                ),
                 next_phase=plan.current_phase or "competency_validation",
-                decision_rule="generic_answer_needs_clarification",
+                decision_rule=event.decision_rule or "generic_answer_needs_clarification",
                 evidence_excerpt=evidence_excerpt,
                 adaptive_question_type="clarification",
+                semantic_evaluation=event.semantic_evaluation,
+            )
+        if event.chosen_action == "move_on_from_unresolved_competency":
+            has_more_competencies = current_competency_index + 1 < len(plan.competencies)
+            return AnswerEvaluation(
+                coverage_gain=0.0,
+                evidence_increment=0,
+                is_generic=False,
+                has_inconsistency=False,
+                should_advance=has_more_competencies,
+                should_wrap_up=not has_more_competencies,
+                should_escalate=False,
+                chosen_action=event.chosen_action,
+                confidence=event.confidence or 0.78,
+                reason=event.reason,
+                next_intended_step=(
+                    BilingualText(
+                        vi=f"Chuyển sang xác minh năng lực tiếp theo: {next_competency_name.vi}.",
+                        en=f"Move on to validate the next competency: {next_competency_name.en}.",
+                    )
+                    if has_more_competencies
+                    else BilingualText(
+                        vi="Tổng kết các khoảng trống bằng chứng còn lại rồi kết thúc buổi phỏng vấn.",
+                        en="Summarize the remaining evidence gaps and close the interview.",
+                    )
+                ),
+                decision_status=self._runtime_decision_status(
+                    needs_hr_review=(
+                        event.semantic_evaluation is not None and event.semantic_evaluation.needs_hr_review
+                    ),
+                    default_status="adjust" if has_more_competencies else "ready_to_wrap",
+                ),
+                next_phase="deep_dive" if has_more_competencies else "wrap_up",
+                decision_rule=event.decision_rule or "explicit_capability_gap_move_on",
+                evidence_excerpt=evidence_excerpt,
+                semantic_evaluation=event.semantic_evaluation,
             )
         if event.chosen_action == "prepare_wrap_up":
             return AnswerEvaluation(
@@ -1317,6 +2007,7 @@ class InterviewSessionService:
                 next_phase="wrap_up",
                 decision_rule=event.decision_rule or "all_competencies_covered_prepare_wrap_up",
                 evidence_excerpt=evidence_excerpt,
+                semantic_evaluation=event.semantic_evaluation,
             )
         if event.chosen_action == "advance_to_next_competency":
             return AnswerEvaluation(
@@ -1334,10 +2025,16 @@ class InterviewSessionService:
                     vi=f"Chuyển sang xác minh năng lực tiếp theo: {next_competency_name.vi}.",
                     en=f"Move on to validate the next competency: {next_competency_name.en}.",
                 ),
-                decision_status="continue",
+                decision_status=self._runtime_decision_status(
+                    needs_hr_review=(
+                        event.semantic_evaluation is not None and event.semantic_evaluation.needs_hr_review
+                    ),
+                    default_status="continue",
+                ),
                 next_phase="deep_dive",
                 decision_rule=event.decision_rule or "advance_after_sufficient_evidence",
                 evidence_excerpt=evidence_excerpt,
+                semantic_evaluation=event.semantic_evaluation,
             )
         return AnswerEvaluation(
             coverage_gain=0.2,
@@ -1354,28 +2051,68 @@ class InterviewSessionService:
                 vi="Tiếp tục đào sâu năng lực hiện tại để hoàn thiện coverage.",
                 en="Keep probing the current competency to complete coverage.",
             ),
-            decision_status="continue",
+            decision_status=self._runtime_decision_status(
+                needs_hr_review=(
+                    event.semantic_evaluation is not None and event.semantic_evaluation.needs_hr_review
+                ),
+                default_status="continue",
+            ),
             next_phase="deep_dive",
             decision_rule=event.decision_rule or "continue_current_competency",
             evidence_excerpt=evidence_excerpt,
+            semantic_evaluation=event.semantic_evaluation,
+        )
+
+    def _build_contextual_adaptive_prompt(
+        self,
+        *,
+        current_question: InterviewQuestion,
+        adaptive_question_type: str | None,
+    ) -> BilingualText:
+        reference_vi = current_question.prompt.vi.strip() or "câu hỏi vừa rồi"
+        reference_en = current_question.prompt.en.strip() or "the previous question"
+        if adaptive_question_type == "recovery":
+            return BilingualText(
+                vi=(
+                    f'Quay lại câu hỏi "{reference_vi}", tôi muốn làm rõ timeline và phần bạn trực tiếp sở hữu '
+                    "trong ví dụ này. Bạn có thể trình bày theo thứ tự thời gian, tách rõ việc bạn trực tiếp làm, "
+                    "phần phối hợp với người khác và kết quả cuối cùng không?"
+                ),
+                en=(
+                    f'Going back to the question "{reference_en}", I want to clarify the timeline and the part you '
+                    "directly owned in that example. Can you walk through it chronologically, separate what you did "
+                    "yourself from what was collaborative, and explain the final outcome?"
+                ),
+            )
+        return BilingualText(
+            vi=(
+                f'Quay lại câu hỏi "{reference_vi}", bạn hãy đưa một ví dụ thật cụ thể, nêu rõ bối cảnh, '
+                "hành động trực tiếp của bạn và kết quả đo được."
+            ),
+            en=(
+                f'Going back to the question "{reference_en}", please share one concrete example with the context, '
+                "your direct actions, and a measurable outcome."
+            ),
         )
 
     def _build_adaptive_question(
         self,
         *,
+        current_question: InterviewQuestion,
         event: InterviewPlanEvent,
         evaluation: AnswerEvaluation,
     ) -> dict[str, object]:
+        prompt = self._build_contextual_adaptive_prompt(
+            current_question=current_question,
+            adaptive_question_type=evaluation.adaptive_question_type,
+        )
         if evaluation.adaptive_question_type == "recovery":
             return {
                 "question_index": (event.question_index or 0) + 1,
                 "dimension_name": event.affected_competency.model_dump(mode="json")
                 if event.affected_competency is not None
                 else {"vi": "Recovery", "en": "Recovery"},
-                "prompt": {
-                    "vi": "Tôi muốn làm rõ lại timeline và vai trò của bạn trong ví dụ vừa nêu. Bạn có thể mô tả theo thứ tự thời gian và phần việc trực tiếp bạn chịu trách nhiệm không?",
-                    "en": "I want to clarify the timeline and your ownership in that example. Can you walk through it chronologically and separate what you directly owned?",
-                },
+                "prompt": prompt.model_dump(mode="json"),
                 "purpose": {
                     "vi": "Làm rõ tín hiệu mâu thuẫn về timeline hoặc ownership mà không giả định ứng viên sai.",
                     "en": "Clarify timeline or ownership inconsistencies without assuming the candidate is wrong.",
@@ -1400,10 +2137,7 @@ class InterviewSessionService:
             "dimension_name": event.affected_competency.model_dump(mode="json")
             if event.affected_competency is not None
             else {"vi": "Làm rõ", "en": "Clarification"},
-            "prompt": {
-                "vi": "Bạn có thể chia sẻ một ví dụ cụ thể hơn, bao gồm bối cảnh, hành động và kết quả không?",
-                "en": "Can you share a more concrete example, including the context, your actions, and the outcome?",
-            },
+            "prompt": prompt.model_dump(mode="json"),
             "purpose": {
                 "vi": "Bổ sung bằng chứng cụ thể cho năng lực hiện tại.",
                 "en": "Collect more concrete evidence for the current competency.",
@@ -1430,8 +2164,7 @@ class InterviewSessionService:
         event: InterviewPlanEvent,
     ) -> dict[str, object]:
         next_payload = dict(payload)
-        plan_events_payload = next_payload.get("plan_events")
-        plan_events = list(plan_events_payload) if isinstance(plan_events_payload, list) else []
+        plan_events = list(_as_object_list(next_payload.get("plan_events")) or [])
         plan_events.append(event.model_dump(mode="json"))
         next_payload["plan_events"] = plan_events
         return next_payload
@@ -1446,7 +2179,7 @@ class InterviewSessionService:
         if plan is None:
             return next_payload
 
-        current_competency_index = min(
+        fallback_competency_index = min(
             plan.current_competency_index,
             max(len(plan.competencies) - 1, 0),
         )
@@ -1457,6 +2190,11 @@ class InterviewSessionService:
         )
         if current_question is None:
             return next_payload
+        current_competency_index = self._get_competency_index_for_question(
+            plan=plan,
+            question=current_question,
+            fallback_index=fallback_competency_index,
+        )
 
         evaluation = self._derive_evaluation_from_event(
             plan=plan,
@@ -1464,11 +2202,11 @@ class InterviewSessionService:
             current_question=current_question,
             event=event,
         )
-        competencies_payload = next_payload.get("competencies")
-        if isinstance(competencies_payload, list) and current_competency_index < len(competencies_payload):
-            updated_competencies = list(competencies_payload)
-            current_competency_payload = updated_competencies[current_competency_index]
-            if isinstance(current_competency_payload, Mapping):
+        competencies_payload = _as_object_list(next_payload.get("competencies"))
+        if competencies_payload is not None and current_competency_index < len(competencies_payload):
+            updated_competencies: list[object] = list(competencies_payload)
+            current_competency_payload = _as_object_mapping(updated_competencies[current_competency_index])
+            if current_competency_payload is not None:
                 updated_competency = dict(current_competency_payload)
                 prior_coverage = updated_competency.get("current_coverage")
                 safe_prior_coverage = prior_coverage if isinstance(prior_coverage, int | float) else 0.0
@@ -1485,17 +2223,19 @@ class InterviewSessionService:
                 updated_competency["status"] = (
                     "needs_recovery"
                     if evaluation.adaptive_question_type == "recovery"
+                    or event.chosen_action == "move_on_from_unresolved_competency"
                     else "covered"
                     if evaluation.should_advance or evaluation.should_wrap_up
                     else "in_progress"
                 )
                 updated_competencies[current_competency_index] = updated_competency
-            if (
-                evaluation.should_advance
-                and current_competency_index + 1 < len(updated_competencies)
-                and isinstance(updated_competencies[current_competency_index + 1], Mapping)
-            ):
-                next_competency = dict(updated_competencies[current_competency_index + 1])
+            next_competency_payload = (
+                _as_object_mapping(updated_competencies[current_competency_index + 1])
+                if evaluation.should_advance and current_competency_index + 1 < len(updated_competencies)
+                else None
+            )
+            if next_competency_payload is not None:
+                next_competency = dict(next_competency_payload)
                 if next_competency.get("status") == "not_started":
                     next_competency["status"] = "in_progress"
                 updated_competencies[current_competency_index + 1] = next_competency
@@ -1517,30 +2257,45 @@ class InterviewSessionService:
         if event.event_type != "plan.adjusted" or event.question_index is None:
             return next_payload
 
-        questions_payload = next_payload.get("questions")
-        if not isinstance(questions_payload, list):
+        questions_payload = _as_object_list(next_payload.get("questions"))
+        if questions_payload is None:
             return next_payload
 
-        adaptive_question = self._build_adaptive_question(event=event, evaluation=evaluation)
+        adaptive_question = self._build_adaptive_question(
+            current_question=current_question,
+            event=event,
+            evaluation=evaluation,
+        )
         insert_index = min(event.question_index + 1, len(questions_payload))
-        existing_prompt = adaptive_question["prompt"]["en"]
+        prompt_payload = _as_object_mapping(adaptive_question.get("prompt"))
+        existing_prompt_value = prompt_payload.get("en") if prompt_payload is not None else None
+        existing_prompt = existing_prompt_value if isinstance(existing_prompt_value, str) else None
         existing_type = adaptive_question["question_type"]
-        existing_target = adaptive_question.get("target_competency", {}).get("en")
-        if any(
-            isinstance(item, Mapping)
-            and isinstance(item.get("prompt"), Mapping)
-            and item.get("prompt", {}).get("en") == existing_prompt
-            and item.get("question_type") == existing_type
-            and isinstance(item.get("target_competency"), Mapping)
-            and item.get("target_competency", {}).get("en") == existing_target
-            for item in questions_payload
-        ):
-            return next_payload
+        target_payload = _as_object_mapping(adaptive_question.get("target_competency"))
+        existing_target_value = target_payload.get("en") if target_payload is not None else None
+        existing_target = existing_target_value if isinstance(existing_target_value, str) else None
+        for item_value in questions_payload:
+            item = _as_object_mapping(item_value)
+            if item is None:
+                continue
+            item_prompt = _as_object_mapping(item.get("prompt"))
+            item_target = _as_object_mapping(item.get("target_competency"))
+            item_prompt_value = item_prompt.get("en") if item_prompt is not None else None
+            item_target_value = item_target.get("en") if item_target is not None else None
+            item_prompt_en = item_prompt_value if isinstance(item_prompt_value, str) else None
+            item_target_en = item_target_value if isinstance(item_target_value, str) else None
+            if (
+                item_prompt_en == existing_prompt
+                and item.get("question_type") == existing_type
+                and item_target_en == existing_target
+            ):
+                return next_payload
 
-        updated_questions = list(questions_payload)
+        updated_questions: list[object] = list(questions_payload)
         updated_questions.insert(insert_index, adaptive_question)
-        for index, item in enumerate(updated_questions):
-            if isinstance(item, Mapping):
+        for index, item_value in enumerate(updated_questions):
+            item = _as_object_mapping(item_value)
+            if item is not None:
                 updated_item = dict(item)
                 updated_item["question_index"] = index
                 updated_questions[index] = updated_item
@@ -1598,12 +2353,7 @@ class InterviewSessionService:
         )
 
         payload = dict(screening_payload)
-        interview_draft_payload = payload.get("interview_draft")
-        interview_draft = (
-            dict(interview_draft_payload)
-            if isinstance(interview_draft_payload, Mapping)
-            else {}
-        )
+        interview_draft = _as_object_dict(payload.get("interview_draft")) or {}
         interview_draft["manual_questions"] = normalized_manual_questions
         interview_draft["question_guidance"] = normalized_guidance
         interview_draft["approved_questions"] = normalized_approved_questions
