@@ -32,7 +32,6 @@ vi.mock("next/link", () => ({
 
 vi.mock("next/navigation", () => ({
   usePathname: () => "/dashboard",
-  useSearchParams: () => new URLSearchParams(),
 }))
 
 test("shows navigation loading overlay immediately when app links are clicked", async () => {
@@ -49,4 +48,18 @@ test("shows navigation loading overlay immediately when app links are clicked", 
 
   expect(screen.getByRole("status")).toBeInTheDocument()
   expect(screen.getByTestId("navigation-spinner")).toBeInTheDocument()
+})
+
+test("does not show navigation loading overlay when clicking the current route", async () => {
+  render(
+    <NavigationLoadingProvider>
+      <AppLink href="/dashboard">Tổng quan</AppLink>
+    </NavigationLoadingProvider>,
+  )
+
+  const user = userEvent.setup()
+  await user.click(screen.getByRole("link", { name: "Tổng quan" }))
+
+  expect(screen.queryByRole("status")).not.toBeInTheDocument()
+  expect(screen.queryByTestId("navigation-spinner")).not.toBeInTheDocument()
 })
