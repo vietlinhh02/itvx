@@ -18,11 +18,13 @@ from src.models.cv import CandidateDocument, CandidateProfile, CandidateScreenin
 from src.models.interview import InterviewSession
 from src.models.jd import JDAnalysis, JDDocument
 from src.schemas.cv import (
+    AuditMetadata,
     CandidateProfilePayload,
     CVScreeningEnqueueResponse,
     CVScreeningHistoryItem,
     CVScreeningResponse,
     RequirementStatus,
+    ScreeningResultPayload,
     ScreeningRecommendation,
     StoredScreeningPayload,
 )
@@ -36,6 +38,16 @@ FUTURE_TIMELINE_PATTERNS = (
     "future relative to current standard screening periods",
     "projected future internships",
     "future date",
+    "current year is",
+    "current date is",
+    "given the current date is",
+    "while the current year is",
+    "while the current date is",
+    "relative to the current date",
+    "relative to the current year",
+    "hiện tại là năm",
+    "ngày hiện tại",
+    "tương lai",
     "time contradiction",
     "mâu thuẫn về thời gian",
 )
@@ -136,7 +148,11 @@ class CVScreeningService:
             file_path=Path(stored_file.storage_path),
             mime_type=mime_type,
         )
-        reconciled_payload = self._reconcile_screening_payload(generated_payload)
+        reconciled_payload = self._reconcile_screening_payload(
+            generated_payload,
+            model_name=settings.gemini_model,
+            created_at=datetime.now(UTC),
+        )
         persisted_profile.profile_payload = reconciled_payload.candidate_profile.model_dump(
             mode="json"
         )
@@ -259,7 +275,11 @@ class CVScreeningService:
             file_path=Path(candidate_document.storage_path),
             mime_type=candidate_document.mime_type,
         )
-        reconciled_payload = self._reconcile_screening_payload(generated_payload)
+        reconciled_payload = self._reconcile_screening_payload(
+            generated_payload,
+            model_name=screening.model_name,
+            created_at=screening.created_at,
+        )
         profile.profile_payload = reconciled_payload.candidate_profile.model_dump(mode="json")
         screening.screening_payload = reconciled_payload.model_dump(mode="json")
         screening.status = "completed"
@@ -402,39 +422,103 @@ class CVScreeningService:
             match_score=match_score,
         )
 
+    def _is_stale_future_timeline_text(self, *parts: str | None) -> bool:
+        """Return whether text describes a future-date issue that is stale now."""
+        timeline_text = " ".join(part for part in parts if part).lower()
+        if not timeline_text:
+            return False
+
+        years = [int(value) for value in re.findall(r"\b\d{4}\b", timeline_text)]
+        current_year = datetime.now(UTC).year
+        mentions_future_timeline = any(
+            pattern in timeline_text for pattern in FUTURE_TIMELINE_PATTERNS
+        )
+        return mentions_future_timeline and bool(years) and max(years) <= current_year
+
     def _sanitize_profile_uncertainties(
         self,
         candidate_profile: CandidateProfilePayload,
     ) -> tuple[CandidateProfilePayload, bool]:
-        """Remove stale future-date timeline uncertainties from the profile."""
-        current_year = datetime.now(UTC).year
+        """Remove stale future-date timeline artifacts from the profile."""
         kept_uncertainties = []
+        kept_work_experience = []
         removed_stale_timeline = False
 
         for item in candidate_profile.profile_uncertainties:
-            timeline_text = " ".join(
-                filter(
-                    None,
-                    [item.title.en, item.title.vi, item.reason.en, item.reason.vi],
-                )
-            ).lower()
-            years = [int(value) for value in re.findall(r"\b\d{4}\b", timeline_text)]
-            mentions_future_timeline = any(
-                pattern in timeline_text for pattern in FUTURE_TIMELINE_PATTERNS
-            )
-            stale_future_timeline = (
-                mentions_future_timeline and years and max(years) <= current_year
-            )
-            if stale_future_timeline:
+            if self._is_stale_future_timeline_text(
+                item.title.en,
+                item.title.vi,
+                item.reason.en,
+                item.reason.vi,
+                item.impact.en,
+                item.impact.vi,
+            ):
                 removed_stale_timeline = True
                 continue
             kept_uncertainties.append(item)
 
+        for item in candidate_profile.work_experience:
+            kept_ambiguity_notes = [
+                note
+                for note in item.ambiguity_notes
+                if not self._is_stale_future_timeline_text(
+                    note,
+                    item.start_date_text,
+                    item.end_date_text,
+                )
+            ]
+            if len(kept_ambiguity_notes) != len(item.ambiguity_notes):
+                removed_stale_timeline = True
+            kept_work_experience.append(
+                item.model_copy(
+                    update={"ambiguity_notes": kept_ambiguity_notes},
+                    deep=True,
+                )
+            )
+
         sanitized_profile = candidate_profile.model_copy(
-            update={"profile_uncertainties": kept_uncertainties},
+            update={
+                "profile_uncertainties": kept_uncertainties,
+                "work_experience": kept_work_experience,
+            },
             deep=True,
         )
         return sanitized_profile, removed_stale_timeline
+
+    def _sanitize_screening_timeline_artifacts(
+        self,
+        result: ScreeningResultPayload,
+        audit: AuditMetadata,
+    ) -> tuple[ScreeningResultPayload, AuditMetadata, bool]:
+        """Remove stale future-date review artifacts from result and audit."""
+        kept_risk_flags = [
+            item
+            for item in result.risk_flags
+            if not self._is_stale_future_timeline_text(
+                item.title.en,
+                item.title.vi,
+                item.reason.en,
+                item.reason.vi,
+            )
+        ]
+        kept_reconciliation_notes = [
+            item
+            for item in audit.reconciliation_notes
+            if not self._is_stale_future_timeline_text(item)
+        ]
+        removed_stale_timeline = (
+            len(kept_risk_flags) != len(result.risk_flags)
+            or len(kept_reconciliation_notes) != len(audit.reconciliation_notes)
+        )
+        sanitized_result = result.model_copy(
+            update={"risk_flags": kept_risk_flags},
+            deep=True,
+        )
+        sanitized_audit = audit.model_copy(
+            update={"reconciliation_notes": kept_reconciliation_notes},
+            deep=True,
+        )
+        return sanitized_result, sanitized_audit, removed_stale_timeline
 
     def _is_current_screening_payload(self, screening_payload: Mapping[str, object]) -> bool:
         """Return whether the stored payload already matches the Phase 2 shape."""
@@ -615,7 +699,11 @@ class CVScreeningService:
             screening_payload
         ) and self._has_current_schema_versions(screening_payload):
             payload = StoredScreeningPayload.model_validate(screening_payload)
-            return self._reconcile_screening_payload(payload)
+            return self._reconcile_screening_payload(
+                payload,
+                model_name=model_name,
+                created_at=created_at,
+            )
 
         candidate_profile = self._normalize_candidate_profile_payload(candidate_profile_payload)
         recommendation = str(recommendation_source or "review")
@@ -661,7 +749,11 @@ class CVScreeningService:
             "interview_draft": interview_draft_source,
         }
         payload = StoredScreeningPayload.model_validate(sanitized_payload)
-        return self._reconcile_screening_payload(payload)
+        return self._reconcile_screening_payload(
+            payload,
+            model_name=model_name,
+            created_at=created_at,
+        )
 
     async def backfill_screening_payload(self, screening_id: str) -> bool:
         """Rewrite one stored legacy payload into the current Phase 2 shape."""
@@ -752,6 +844,13 @@ class CVScreeningService:
         message = HumanMessage(
             content=[
                 {"type": "text", "text": build_screening_prompt()},
+                {
+                    "type": "text",
+                    "text": (
+                        "Authoritative current Vietnam datetime: "
+                        f"{get_current_datetime()}"
+                    ),
+                },
                 {"type": "text", "text": jd_analysis.model_dump_json(indent=2)},
                 {
                     "type": "media",
@@ -766,6 +865,9 @@ class CVScreeningService:
     def _reconcile_screening_payload(
         self,
         payload: StoredScreeningPayload,
+        *,
+        model_name: str | None = None,
+        created_at: datetime | None = None,
     ) -> StoredScreeningPayload:
         """Reconcile model output with deterministic backend rules."""
         candidate_profile, removed_stale_timeline = self._sanitize_profile_uncertainties(
@@ -773,6 +875,10 @@ class CVScreeningService:
         )
         result = payload.result.model_copy(deep=True)
         audit = payload.audit.model_copy(deep=True)
+        result, audit, removed_stale_review_artifacts = self._sanitize_screening_timeline_artifacts(
+            result,
+            audit,
+        )
 
         recomputed_score = round(
             sum(item.weight * item.score for item in result.dimension_scores),
@@ -811,10 +917,20 @@ class CVScreeningService:
             audit.reconciliation_notes.append(
                 "Removed stale future-date timeline uncertainty from candidate profile."
             )
+        if removed_stale_review_artifacts:
+            audit.reconciliation_notes.append(
+                "Removed stale future-date timeline review artifacts from screening output."
+            )
+
+        if model_name is not None:
+            audit.extraction_model = model_name
+            audit.screening_model = model_name
 
         audit.profile_schema_version = PROFILE_SCHEMA_VERSION
         audit.screening_schema_version = SCREENING_SCHEMA_VERSION
-        if not audit.generated_at:
+        if created_at is not None:
+            audit.generated_at = to_vietnam_isoformat(created_at)
+        elif not audit.generated_at:
             audit.generated_at = vietnam_now_isoformat()
 
         return StoredScreeningPayload(

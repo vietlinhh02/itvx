@@ -408,6 +408,18 @@ class FakeStructuredScreeningInvoker:
         return sample_stored_screening_payload().model_dump(mode="json")
 
 
+class CaptureStructuredScreeningInvoker:
+    """Capture screening prompt inputs for assertions."""
+
+    def __init__(self) -> None:
+        self.calls: list[list[HumanMessage]] = []
+
+    async def ainvoke(self, input: list[HumanMessage]) -> object:
+        """Record the request and return a valid screening payload."""
+        self.calls.append(input)
+        return sample_stored_screening_payload().model_dump(mode="json")
+
+
 def test_build_cv_extraction_prompt_mentions_phase_2_review_artifacts() -> None:
     """Ensure the extraction prompt calls out Phase 2 review requirements."""
     prompt = build_cv_extraction_prompt()
@@ -463,6 +475,34 @@ async def test_screening_adapter_validates_stored_screening_payload(tmp_path: Pa
 
     assert payload.result.recommendation == "advance"
     assert payload.audit.profile_schema_version == "phase2.v1"
+
+
+@pytest.mark.asyncio
+async def test_generate_screening_payload_includes_authoritative_current_datetime(
+    tmp_path: Path,
+) -> None:
+    """Send the concrete current Vietnam datetime into the model context."""
+    service = CVScreeningService.__new__(CVScreeningService)
+    capture = CaptureStructuredScreeningInvoker()
+    service._screening_llm = capture  # pyright: ignore[reportPrivateUsage]
+
+    file_path = tmp_path / "candidate.pdf"
+    _ = file_path.write_bytes(b"%PDF-1.7\ncandidate")
+    await service._generate_screening_payload(  # pyright: ignore[reportPrivateUsage]
+        jd_analysis=JDAnalysisPayload.model_validate(sample_jd_analysis_payload()),
+        file_path=file_path,
+        mime_type="application/pdf",
+    )
+
+    assert capture.calls
+    content = capture.calls[0][0].content
+    assert isinstance(content, list)
+    assert any(
+        part.get("type") == "text"
+        and "authoritative current vietnam datetime:" in str(part.get("text", "")).lower()
+        for part in content
+        if isinstance(part, dict)
+    )
 
 
 def test_reconcile_screening_downgrades_advance_on_knockout_failure() -> None:
@@ -556,6 +596,107 @@ def test_reconcile_screening_removes_stale_future_timeline_uncertainty() -> None
     assert any(
         "stale future-date timeline uncertainty" in note.lower()
         for note in reconciled.audit.reconciliation_notes
+    )
+
+
+def test_normalize_current_payload_overrides_untrusted_audit_metadata() -> None:
+    """Use database metadata as the source of truth for current-shape payloads too."""
+    service = CVScreeningService.__new__(CVScreeningService)
+    payload = sample_stored_screening_payload().model_dump(mode="json")
+    payload["audit"] = {
+        "extraction_model": "gpt-4o",
+        "screening_model": "gpt-4o",
+        "profile_schema_version": "phase2.v1",
+        "screening_schema_version": "phase2.v2",
+        "generated_at": "2024-05-22T10:00:00Z",
+        "reconciliation_notes": [],
+        "consistency_flags": [],
+    }
+
+    normalized = service._normalize_stored_screening_payload(  # pyright: ignore[reportPrivateUsage]
+        screening_payload=payload,
+        candidate_profile_payload=sample_candidate_profile_payload().model_dump(mode="json"),
+        model_name="gemini-3-flash-preview",
+        created_at=datetime(2026, 4, 19, 6, 0, 40, tzinfo=UTC),
+    )
+
+    assert normalized.audit.extraction_model == "gemini-3-flash-preview"
+    assert normalized.audit.screening_model == "gemini-3-flash-preview"
+    assert normalized.audit.generated_at == "2026-04-19T13:00:40+07:00"
+
+
+def test_normalize_current_payload_removes_stale_future_timeline_review_artifacts() -> None:
+    """Drop stale timeline warnings when the referenced year is no longer in the future."""
+    service = CVScreeningService.__new__(CVScreeningService)
+    payload = sample_stored_screening_payload().model_dump(mode="json")
+    payload["candidate_profile"] = sample_candidate_profile_payload(
+        profile_uncertainties=[
+            {
+                "title": {
+                    "vi": "Mốc thời gian không nhất quán",
+                    "en": "Timeline Inconsistency",
+                },
+                "reason": {
+                    "vi": "Kinh nghiệm làm việc được ghi bắt đầu vào năm 2025, trong khi hiện tại là năm 2024.",
+                    "en": "Work experience is listed as starting in 2025, while the current year is 2024.",
+                },
+                "impact": {
+                    "vi": "Cần xác minh lại mốc thời gian.",
+                    "en": "Need to verify the timeline.",
+                },
+            }
+        ]
+    ).model_dump(mode="json")
+    payload["candidate_profile"]["work_experience"][0]["ambiguity_notes"] = [
+        "The start date (May 2025) is in the future relative to the current date (May 2024)."
+    ]
+    payload["result"]["risk_flags"] = [
+        {
+            "title": {
+                "vi": "Sai lệch thông tin thời gian",
+                "en": "Timeline Discrepancy",
+            },
+            "reason": {
+                "vi": "Ghi nhận kinh nghiệm làm việc bắt đầu từ tháng 5/2025 (tương lai).",
+                "en": "Recorded work experience starting from May 2025 (future).",
+            },
+            "severity": "medium",
+        }
+    ]
+    payload["audit"] = {
+        "extraction_model": "gpt-4o",
+        "screening_model": "gpt-4o",
+        "profile_schema_version": "phase2.v1",
+        "screening_schema_version": "phase2.v2",
+        "generated_at": "2024-05-22T10:00:00Z",
+        "reconciliation_notes": [
+            "Dates in CV (2025) were treated as potential typos or future projections given the current date is May 2024."
+        ],
+        "consistency_flags": [
+            "Role mismatch: Candidate is an Engineer applying for a BA role."
+        ],
+    }
+
+    normalized = service._normalize_stored_screening_payload(  # pyright: ignore[reportPrivateUsage]
+        screening_payload=payload,
+        candidate_profile_payload=payload["candidate_profile"],
+        model_name="gemini-3-flash-preview",
+        created_at=datetime(2026, 4, 19, 6, 0, 40, tzinfo=UTC),
+    )
+
+    assert normalized.candidate_profile.profile_uncertainties == []
+    assert normalized.candidate_profile.work_experience[0].ambiguity_notes == []
+    assert normalized.result.risk_flags == []
+    assert not any(
+        "current date is may 2024" in note.lower()
+        for note in normalized.audit.reconciliation_notes
+    )
+    assert normalized.audit.consistency_flags == [
+        "Role mismatch: Candidate is an Engineer applying for a BA role."
+    ]
+    assert any(
+        "stale future-date timeline" in note.lower()
+        for note in normalized.audit.reconciliation_notes
     )
 
 
