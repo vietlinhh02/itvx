@@ -91,6 +91,7 @@ config = WorkerConfig(
         "GEMINI_LIVE_MODEL",
         os.getenv("GEMINI_MODEL", "gemini-2.5-flash-native-audio-preview-12-2025"),
     ),
+    gemini_voice=os.getenv("GEMINI_LIVE_VOICE", "Aoede"),
     livekit_url=os.getenv("LIVEKIT_URL", "wss://your-project.livekit.cloud"),
     worker_host=os.getenv("INTERVIEW_WORKER_HOST", "127.0.0.1"),
     worker_port=int(os.getenv("INTERVIEW_WORKER_PORT", "8765")),

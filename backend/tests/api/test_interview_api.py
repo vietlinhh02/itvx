@@ -524,12 +524,18 @@ def test_publish_interview_returns_share_link(monkeypatch: MonkeyPatch) -> None:
             "approved_questions": ["Bạn có thể giới thiệu ngắn về bản thân không?"],
             "manual_questions": ["Bạn có thể giới thiệu ngắn về bản thân không?"],
             "question_guidance": "Tập trung vào backend",
+            "interview_scope": {
+                "preset": "basic",
+                "enabled_competencies": ["Backend"],
+            },
         },
     )
 
     assert response.status_code == 201
     assert "/interviews/join/" in response.json()["share_link"]
     assert response.json()["status"] == "published"
+    assert FakeInterviewSessionService.last_payload.interview_scope is not None
+    assert FakeInterviewSessionService.last_payload.interview_scope.preset == "basic"
 
 
 

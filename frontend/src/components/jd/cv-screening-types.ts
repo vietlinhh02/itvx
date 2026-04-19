@@ -200,6 +200,10 @@ export type InterviewDraft = {
   manual_questions: string[]
   question_guidance: string | null
   approved_questions: string[]
+  interview_scope?: {
+    preset: "full" | "basic" | "intro_only"
+    enabled_competencies: string[]
+  } | null
 }
 
 export type CVScreeningCompletedResponse = CVScreeningResponseBase & {

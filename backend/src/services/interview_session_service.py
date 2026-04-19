@@ -12,7 +12,7 @@ from src.config import settings
 from src.models.background_job import BackgroundJob, BackgroundJobStatus, BackgroundJobType
 from src.models.cv import CandidateProfile, CandidateScreening
 from src.models.interview import InterviewRuntimeEvent, InterviewSession, InterviewTurn
-from src.models.jd import JDDocument
+from src.models.jd import JDCompanyDocument, JDDocument
 from src.schemas.interview import (
     CandidateJoinPreviewResponse,
     CandidateJoinRequest,
@@ -33,6 +33,7 @@ from src.schemas.interview import (
     InterviewSessionDetailResponse,
     InterviewSessionReviewResponse,
     InterviewSessionRuntimeStateResponse,
+    InterviewScopeConfig,
     ProposeInterviewScheduleRequest,
     PublishInterviewRequest,
     PublishInterviewResponse,
@@ -178,12 +179,14 @@ class InterviewSessionService:
             screening_payload=screening.screening_payload,
             manual_questions=payload.manual_questions,
             question_guidance=payload.question_guidance,
+            interview_scope=payload.interview_scope,
         )
         screening.screening_payload = self._merge_interview_draft(
             screening.screening_payload,
             manual_questions=generated.manual_questions,
             question_guidance=generated.question_guidance,
             approved_questions=[item.question_text for item in generated.generated_questions],
+            interview_scope=payload.interview_scope,
             generated_questions=generated.generated_questions,
         )
         await self._db_session.commit()
@@ -234,6 +237,7 @@ class InterviewSessionService:
             jd_id=jd_document.id,
             screening_payload=screening.screening_payload,
             approved_questions=approved_questions,
+            interview_scope=payload.interview_scope,
         )
         session = InterviewSession(
             candidate_screening_id=screening.id,
@@ -695,6 +699,7 @@ class InterviewSessionService:
     async def get_runtime_state(self, session_id: str) -> InterviewSessionRuntimeStateResponse:
         detail = await self.get_session_detail(session_id)
         decision_status = detail.plan.interview_decision_status if detail.plan is not None else None
+        company_knowledge_available = await self._has_company_knowledge_available(session_id)
         current_question = (
             detail.plan.questions[detail.current_question_index]
             if detail.plan is not None and detail.plan.questions and detail.current_question_index < len(detail.plan.questions)
@@ -714,8 +719,22 @@ class InterviewSessionService:
             interview_decision_status=decision_status,
             needs_hr_review=self._plan_needs_hr_review(detail.plan),
             current_phase=detail.plan.current_phase if detail.plan is not None else None,
+            company_knowledge_available=company_knowledge_available,
             last_plan_event=last_plan_event,
         )
+
+    async def _has_company_knowledge_available(self, session_id: str) -> bool:
+        jd_id = await self.get_jd_id_for_session(session_id)
+        document_id = await self._db_session.scalar(
+            select(JDCompanyDocument.id)
+            .where(
+                JDCompanyDocument.jd_document_id == jd_id,
+                JDCompanyDocument.status == "ready",
+                JDCompanyDocument.chunk_count > 0,
+            )
+            .limit(1)
+        )
+        return document_id is not None
 
     async def get_session_review(self, session_id: str) -> InterviewSessionReviewResponse:
         detail = await self.get_session_detail(session_id)
@@ -874,6 +893,21 @@ class InterviewSessionService:
             return "ready_to_wrap"
         return "continue_with_hr_flag" if needs_hr_review else default_status
 
+    def _can_prepare_wrap_up(
+        self,
+        *,
+        plan: InterviewPlanPayload,
+        current_question: InterviewQuestion,
+    ) -> bool:
+        if current_question.question_index < len(plan.questions) - 1:
+            return False
+        return not any(
+            item.status == "not_started"
+            and item.current_coverage == 0.0
+            and item.evidence_collected_count == 0
+            for item in plan.competencies
+        )
+
     def _plan_needs_hr_review(self, plan: InterviewPlanPayload | None) -> bool:
         if plan is None:
             return False
@@ -902,8 +936,9 @@ class InterviewSessionService:
         jd_id: str,
         screening_payload: dict[str, object],
         approved_questions: list[str],
+        interview_scope: InterviewScopeConfig | None = None,
     ) -> InterviewPlanPayload:
-        plan = self._plan_service.build_plan(screening_payload)
+        plan = self._plan_service.build_plan(screening_payload, interview_scope=interview_scope)
         policy_version, active_policy, policy_summary = await self._feedback_service.get_active_policy_payload(jd_id)
         if active_policy is not None:
             plan.active_policy = active_policy
@@ -929,17 +964,62 @@ class InterviewSessionService:
                     generated_questions_by_text[question_text.strip().casefold()] = dict(item)
 
         question_items: list[InterviewQuestion] = []
+        default_target_competency = plan.competencies[0].name if len(plan.competencies) == 1 else None
         for index, question_text in enumerate(approved_questions):
             normalized_question = question_text.strip()
             if not normalized_question:
                 continue
             existing_item = dimension_by_question.get(normalized_question.casefold())
             generated_item = generated_questions_by_text.get(normalized_question.casefold(), {})
+            normalized_generated_candidate: InterviewQuestionCandidate | None = None
+            if generated_item:
+                normalized_generated_candidate = self._plan_service.normalize_question_candidate_for_scope(
+                    InterviewQuestionCandidate(
+                        question_text=normalized_question,
+                        source=(
+                            cast(str, generated_item["source"])
+                            if isinstance(generated_item.get("source"), str)
+                            else "approved"
+                        ),
+                        rationale=(
+                            cast(str, generated_item["rationale"])
+                            if isinstance(generated_item.get("rationale"), str)
+                            else None
+                        ),
+                        question_type=(
+                            cast(str, generated_item["question_type"])
+                            if isinstance(generated_item.get("question_type"), str)
+                            else "planned"
+                        ),
+                        target_competency=BilingualText.model_validate(generated_item["target_competency"])
+                        if isinstance(generated_item.get("target_competency"), Mapping)
+                        else None,
+                        selection_reason=BilingualText.model_validate(generated_item["selection_reason"])
+                        if isinstance(generated_item.get("selection_reason"), Mapping)
+                        else None,
+                        priority=(
+                            cast(int, generated_item["priority"])
+                            if isinstance(generated_item.get("priority"), int)
+                            and cast(int, generated_item["priority"]) > 0
+                            else index + 1
+                        ),
+                        evidence_gap=BilingualText.model_validate(generated_item["evidence_gap"])
+                        if isinstance(generated_item.get("evidence_gap"), Mapping)
+                        else None,
+                    ),
+                    plan,
+                )
 
             dimension_name = (
                 existing_item.dimension_name
                 if existing_item is not None
-                else BilingualText(vi="Năng lực trọng tâm", en="Core competency")
+                else (
+                    normalized_generated_candidate.target_competency
+                    if normalized_generated_candidate is not None
+                    else None
+                )
+                or default_target_competency
+                or BilingualText(vi="Năng lực trọng tâm", en="Core competency")
             )
             purpose = (
                 existing_item.purpose
@@ -964,9 +1044,6 @@ class InterviewSessionService:
             if isinstance(generated_rationale, str):
                 rationale = generated_rationale
             priority = generated_item.get("priority")
-            target_competency_payload = generated_item.get("target_competency")
-            selection_reason_payload = generated_item.get("selection_reason")
-            evidence_gap_payload = generated_item.get("evidence_gap")
 
             question_items.append(
                 InterviewQuestion(
@@ -978,15 +1055,38 @@ class InterviewSessionService:
                     question_type=question_type,
                     rationale=rationale,
                     priority=priority if isinstance(priority, int) and priority > 0 else index + 1,
-                    target_competency=BilingualText.model_validate(target_competency_payload)
-                    if isinstance(target_competency_payload, Mapping)
-                    else (existing_item.target_competency if existing_item is not None else dimension_name),
-                    selection_reason=BilingualText.model_validate(selection_reason_payload)
-                    if isinstance(selection_reason_payload, Mapping)
-                    else (existing_item.selection_reason if existing_item is not None else None),
-                    evidence_gap=BilingualText.model_validate(evidence_gap_payload)
-                    if isinstance(evidence_gap_payload, Mapping)
-                    else (existing_item.evidence_gap if existing_item is not None else None),
+                    target_competency=(
+                        existing_item.target_competency
+                        if existing_item is not None
+                        else normalized_generated_candidate.target_competency
+                        if normalized_generated_candidate is not None
+                        else dimension_name
+                    ),
+                    selection_reason=(
+                        normalized_generated_candidate.selection_reason
+                        if normalized_generated_candidate is not None
+                        else (
+                        existing_item.selection_reason
+                        if existing_item is not None
+                        else BilingualText(
+                            vi="Câu hỏi này được gắn vào scope HR đã cấu hình cho phiên này.",
+                            en="This question was attached to the HR-configured scope for this session.",
+                        )
+                        if default_target_competency is not None
+                        else None
+                        )
+                    ),
+                    evidence_gap=(
+                        normalized_generated_candidate.evidence_gap
+                        if normalized_generated_candidate is not None
+                        else (
+                        existing_item.evidence_gap
+                        if existing_item is not None
+                        else self._plan_service._build_evidence_gap(default_target_competency)
+                        if default_target_competency is not None
+                        else None
+                        )
+                    ),
                     transition_on_strong_answer=(
                         existing_item.transition_on_strong_answer
                         if existing_item is not None
@@ -1260,6 +1360,10 @@ class InterviewSessionService:
             if has_more_competencies and current_competency_index + 1 < len(plan.competencies)
             else current_question.target_competency or current_question.dimension_name
         )
+        can_prepare_wrap_up = self._can_prepare_wrap_up(
+            plan=plan,
+            current_question=current_question,
+        )
         coverage_gain_map = {
             "strong": 0.36,
             "partial": 0.22,
@@ -1335,6 +1439,42 @@ class InterviewSessionService:
             )
 
         if semantic.recommended_action == "wrap_up":
+            if not can_prepare_wrap_up:
+                return AnswerEvaluation(
+                    coverage_gain=max(coverage_gain, 1.0 - current_coverage),
+                    evidence_increment=max(1, evidence_increment),
+                    is_generic=False,
+                    has_inconsistency=False,
+                    should_advance=has_more_competencies,
+                    should_wrap_up=False,
+                    should_escalate=semantic.needs_hr_review,
+                    chosen_action=(
+                        "advance_to_next_competency"
+                        if has_more_competencies
+                        else "continue_current_competency"
+                    ),
+                    confidence=semantic.confidence,
+                    reason=semantic.reason,
+                    next_intended_step=(
+                        BilingualText(
+                            vi=f"Chuyển sang xác minh năng lực tiếp theo: {next_competency_name.vi}.",
+                            en=f"Move on to validate the next competency: {next_competency_name.en}.",
+                        )
+                        if has_more_competencies
+                        else BilingualText(
+                            vi="Tiếp tục rà soát coverage còn thiếu trước khi kết thúc buổi phỏng vấn.",
+                            en="Continue covering the remaining interview plan before closing.",
+                        )
+                    ),
+                    decision_status=self._runtime_decision_status(
+                        needs_hr_review=semantic.needs_hr_review,
+                        default_status="continue",
+                    ),
+                    next_phase="deep_dive",
+                    decision_rule="semantic_wrap_up_blocked_remaining_coverage",
+                    evidence_excerpt=evidence_excerpt,
+                    semantic_evaluation=semantic,
+                )
             return AnswerEvaluation(
                 coverage_gain=max(coverage_gain, 1.0 - current_coverage),
                 evidence_increment=max(1, evidence_increment),
@@ -1546,7 +1686,11 @@ class InterviewSessionService:
             and evidence_strength >= strong_threshold
         )
         all_remaining_covered = current_competency_index >= max(len(plan.competencies) - 1, 0)
-        should_wrap_up = should_advance and all_remaining_covered
+        should_wrap_up = (
+            should_advance
+            and all_remaining_covered
+            and self._can_prepare_wrap_up(plan=plan, current_question=current_question)
+        )
         consecutive_adjustments = sum(
             1
             for event in plan.plan_events[-thresholds.escalate_after_consecutive_adjustments :]
@@ -1557,6 +1701,10 @@ class InterviewSessionService:
             and consecutive_adjustments >= thresholds.escalate_after_consecutive_adjustments
         )
         has_more_competencies = current_competency_index < max(len(plan.competencies) - 1, 0)
+        can_prepare_wrap_up = self._can_prepare_wrap_up(
+            plan=plan,
+            current_question=current_question,
+        )
         clarification_attempts_for_competency = self._count_competency_adjustments(
             plan=plan,
             competency_name=current_question.target_competency or current_question.dimension_name,
@@ -1603,9 +1751,13 @@ class InterviewSessionService:
                 is_generic=False,
                 has_inconsistency=False,
                 should_advance=has_more_competencies,
-                should_wrap_up=not has_more_competencies,
+                should_wrap_up=not has_more_competencies and can_prepare_wrap_up,
                 should_escalate=False,
-                chosen_action="move_on_from_unresolved_competency",
+                chosen_action=(
+                    "move_on_from_unresolved_competency"
+                    if has_more_competencies or can_prepare_wrap_up
+                    else "continue_current_competency"
+                ),
                 confidence=0.78,
                 reason=BilingualText(
                     vi="Ứng viên nói rõ chưa có kinh nghiệm với chủ đề này, nên plan ghi nhận gap và chuyển sang competency khác.",
@@ -1618,13 +1770,25 @@ class InterviewSessionService:
                     )
                     if has_more_competencies
                     else BilingualText(
-                        vi="Tổng kết các khoảng trống bằng chứng còn lại rồi kết thúc buổi phỏng vấn.",
-                        en="Summarize the remaining evidence gaps and close the interview.",
+                        vi=(
+                            "Tổng kết các khoảng trống bằng chứng còn lại rồi kết thúc buổi phỏng vấn."
+                            if can_prepare_wrap_up
+                            else "Tiếp tục rà soát coverage còn thiếu trước khi kết thúc buổi phỏng vấn."
+                        ),
+                        en=(
+                            "Summarize the remaining evidence gaps and close the interview."
+                            if can_prepare_wrap_up
+                            else "Continue covering the remaining interview plan before closing."
+                        ),
                     )
                 ),
-                decision_status="adjust" if has_more_competencies else "ready_to_wrap",
-                next_phase="deep_dive" if has_more_competencies else "wrap_up",
-                decision_rule="explicit_capability_gap_move_on",
+                decision_status="adjust" if has_more_competencies or not can_prepare_wrap_up else "ready_to_wrap",
+                next_phase="deep_dive" if has_more_competencies or not can_prepare_wrap_up else "wrap_up",
+                decision_rule=(
+                    "explicit_capability_gap_move_on"
+                    if has_more_competencies or can_prepare_wrap_up
+                    else "wrap_up_blocked_remaining_coverage"
+                ),
                 evidence_excerpt=evidence_excerpt,
             )
         if (
@@ -1643,9 +1807,13 @@ class InterviewSessionService:
                 is_generic=True,
                 has_inconsistency=False,
                 should_advance=has_more_competencies,
-                should_wrap_up=not has_more_competencies,
+                should_wrap_up=not has_more_competencies and can_prepare_wrap_up,
                 should_escalate=False,
-                chosen_action="move_on_from_unresolved_competency",
+                chosen_action=(
+                    "move_on_from_unresolved_competency"
+                    if has_more_competencies or can_prepare_wrap_up
+                    else "continue_current_competency"
+                ),
                 confidence=0.74,
                 reason=BilingualText(
                     vi="Ứng viên đã được hỏi làm rõ nhưng vẫn chưa tạo thêm bằng chứng đủ dùng, nên plan chuyển sang competency khác để tránh lặp.",
@@ -1658,13 +1826,25 @@ class InterviewSessionService:
                     )
                     if has_more_competencies
                     else BilingualText(
-                        vi="Tổng kết các khoảng trống bằng chứng còn lại rồi kết thúc buổi phỏng vấn.",
-                        en="Summarize the remaining evidence gaps and close the interview.",
+                        vi=(
+                            "Tổng kết các khoảng trống bằng chứng còn lại rồi kết thúc buổi phỏng vấn."
+                            if can_prepare_wrap_up
+                            else "Tiếp tục rà soát coverage còn thiếu trước khi kết thúc buổi phỏng vấn."
+                        ),
+                        en=(
+                            "Summarize the remaining evidence gaps and close the interview."
+                            if can_prepare_wrap_up
+                            else "Continue covering the remaining interview plan before closing."
+                        ),
                     )
                 ),
-                decision_status="adjust" if has_more_competencies else "ready_to_wrap",
-                next_phase="deep_dive" if has_more_competencies else "wrap_up",
-                decision_rule="low_signal_answer_after_clarification_move_on",
+                decision_status="adjust" if has_more_competencies or not can_prepare_wrap_up else "ready_to_wrap",
+                next_phase="deep_dive" if has_more_competencies or not can_prepare_wrap_up else "wrap_up",
+                decision_rule=(
+                    "low_signal_answer_after_clarification_move_on"
+                    if has_more_competencies or can_prepare_wrap_up
+                    else "wrap_up_blocked_remaining_coverage"
+                ),
                 evidence_excerpt=evidence_excerpt,
             )
         if is_generic:
@@ -1954,13 +2134,14 @@ class InterviewSessionService:
             )
         if event.chosen_action == "move_on_from_unresolved_competency":
             has_more_competencies = current_competency_index + 1 < len(plan.competencies)
+            can_wrap_after_gap = not has_more_competencies and current_coverage >= 0.5
             return AnswerEvaluation(
                 coverage_gain=0.0,
                 evidence_increment=0,
                 is_generic=False,
                 has_inconsistency=False,
                 should_advance=has_more_competencies,
-                should_wrap_up=not has_more_competencies,
+                should_wrap_up=can_wrap_after_gap,
                 should_escalate=False,
                 chosen_action=event.chosen_action,
                 confidence=event.confidence or 0.78,
@@ -1972,6 +2153,11 @@ class InterviewSessionService:
                     )
                     if has_more_competencies
                     else BilingualText(
+                        vi="Chưa đủ bằng chứng để kết thúc. Hãy hỏi thêm một câu làm rõ cuối cùng trong scope HR đã chọn.",
+                        en="There is not enough evidence to wrap up yet. Ask one final clarification question within the HR-selected scope.",
+                    )
+                    if not can_wrap_after_gap
+                    else BilingualText(
                         vi="Tổng kết các khoảng trống bằng chứng còn lại rồi kết thúc buổi phỏng vấn.",
                         en="Summarize the remaining evidence gaps and close the interview.",
                     )
@@ -1980,9 +2166,9 @@ class InterviewSessionService:
                     needs_hr_review=(
                         event.semantic_evaluation is not None and event.semantic_evaluation.needs_hr_review
                     ),
-                    default_status="adjust" if has_more_competencies else "ready_to_wrap",
+                    default_status="adjust" if not can_wrap_after_gap else "ready_to_wrap",
                 ),
-                next_phase="deep_dive" if has_more_competencies else "wrap_up",
+                next_phase="deep_dive" if has_more_competencies or not can_wrap_after_gap else "wrap_up",
                 decision_rule=event.decision_rule or "explicit_capability_gap_move_on",
                 evidence_excerpt=evidence_excerpt,
                 semantic_evaluation=event.semantic_evaluation,
@@ -2338,6 +2524,7 @@ class InterviewSessionService:
         manual_questions: list[str],
         question_guidance: str | None,
         approved_questions: list[str],
+        interview_scope: InterviewScopeConfig | None,
         generated_questions: list[InterviewQuestionCandidate],
     ) -> dict[str, object]:
         normalized_manual_questions = [
@@ -2357,6 +2544,9 @@ class InterviewSessionService:
         interview_draft["manual_questions"] = normalized_manual_questions
         interview_draft["question_guidance"] = normalized_guidance
         interview_draft["approved_questions"] = normalized_approved_questions
+        interview_draft["interview_scope"] = (
+            interview_scope.model_dump(mode="json") if interview_scope is not None else None
+        )
         interview_draft["generated_questions"] = [
             question.model_dump(mode="json") for question in generated_questions
         ]

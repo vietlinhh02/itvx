@@ -17,6 +17,7 @@ class WorkerConfig(BaseModel):
     backend_callback_secret: str = ""
     gemini_api_key: str = ""
     gemini_model: str = "gemini-2.5-flash-native-audio"
+    gemini_voice: str = "Aoede"
     livekit_url: str = "wss://your-project.livekit.cloud"
     worker_host: str = "127.0.0.1"
     worker_port: int = 8765

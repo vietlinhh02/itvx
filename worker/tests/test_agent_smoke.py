@@ -13,6 +13,7 @@ from src.agent import (
     build_audio_transcription_config,
     build_realtime_model,
     build_turn_handling,
+    is_final_qna_closing_reply,
     model_supports_prompted_turns,
     required_runtime_env,
 )
@@ -33,6 +34,7 @@ class FakeBackendClient:
             "current_question_index": 0,
             "interview_decision_status": "continue",
             "current_phase": "competency_validation",
+            "company_knowledge_available": False,
             "current_question": {
                 "prompt": {
                     "vi": "Bạn có thể giới thiệu ngắn về bản thân không?",
@@ -131,6 +133,64 @@ class FakeAgentSession:
         self.closed = True
 
 
+class SlowTurnBackendClient(FakeBackendClient):
+    def __init__(self) -> None:
+        super().__init__()
+        self.closed_before_turn_finished = False
+
+    async def post_turn(self, session_id: str, payload: dict[str, object]) -> None:
+        _ = session_id
+        await asyncio.sleep(0.05)
+        if self.closed:
+            self.closed_before_turn_finished = True
+            raise RuntimeError("backend client closed before transcript forwarding finished")
+        self.posted_turns.append(payload)
+
+
+class FakeAgentSessionWithTranscript(FakeAgentSession):
+    async def start(self, agent: object, *, room: FakeRoom, room_options: object) -> None:
+        _ = agent
+        _ = room_options
+        self._handlers["conversation_item_added"][0](
+            type(
+                "ConversationEvent",
+                (),
+                {
+                    "item": llm.ChatMessage(
+                        role="assistant",
+                        content=["Cảm ơn bạn đã tham gia buổi phỏng vấn."],
+                    )
+                },
+            )()
+        )
+        await asyncio.sleep(0)
+        asyncio.get_running_loop().call_soon(room.emit, "disconnected", "room_deleted")
+
+
+class FakeAgentSessionCandidateThenDisconnect(FakeAgentSession):
+    async def start(self, agent: object, *, room: FakeRoom, room_options: object) -> None:
+        _ = agent
+        _ = room_options
+        self._handlers["conversation_item_added"][0](
+            type(
+                "ConversationEvent",
+                (),
+                {
+                    "item": llm.ChatMessage(
+                        role="user",
+                        content=["Em nghĩ mình đã chia sẻ đủ các ví dụ chính rồi."],
+                    )
+                },
+            )()
+        )
+        await asyncio.sleep(0.05)
+        room.emit(
+            "participant_disconnected",
+            type("RemoteParticipant", (), {"identity": "candidate-session-1"})(),
+        )
+        await asyncio.sleep(0.05)
+
+
 def test_worker_entry_file_exists() -> None:
     agent_path = Path(__file__).resolve().parents[1] / "src" / "agent.py"
     assert agent_path.exists()
@@ -168,7 +228,7 @@ def test_transcript_forwarder_waits_for_candidate_turn_settle_before_follow_up()
     backend_client = FakeBackendClient()
     triggered = 0
 
-    async def on_candidate_turn() -> None:
+    async def on_candidate_turn(_: str) -> None:
         nonlocal triggered
         triggered += 1
 
@@ -203,7 +263,7 @@ def test_transcript_forwarder_can_skip_first_candidate_turn_for_user_initiated_m
     backend_client = FakeBackendClient()
     triggered = 0
 
-    async def on_candidate_turn() -> None:
+    async def on_candidate_turn(_: str) -> None:
         nonlocal triggered
         triggered += 1
 
@@ -260,6 +320,7 @@ def test_build_realtime_model_uses_gemini_language_field_for_vietnamese() -> Non
     input_transcription = captured["input_audio_transcription"]
     output_transcription = captured["output_audio_transcription"]
 
+    assert captured["voice"] == "Aoede"
     assert captured["language"] == "vi-VN"
     assert getattr(input_transcription, "language_codes") is None
     assert getattr(output_transcription, "language_codes") is None
@@ -285,6 +346,25 @@ def test_build_realtime_model_keeps_configured_gemini_3_1_preview() -> None:
         )
 
     assert captured["model"] == "gemini-3.1-flash-live-preview"
+
+
+def test_build_realtime_model_uses_configured_voice_override() -> None:
+    captured: dict[str, object] = {}
+
+    def fake_realtime_model(**kwargs: object) -> object:
+        captured.update(kwargs)
+        return object()
+
+    with patch("src.agent.google.realtime.RealtimeModel", side_effect=fake_realtime_model):
+        build_realtime_model(
+            WorkerConfig(
+                gemini_api_key="test-key",
+                gemini_model="gemini-2.5-flash-native-audio-preview-12-2025",
+                gemini_voice="Kore",
+            )
+        )
+
+    assert captured["voice"] == "Kore"
 
 
 def test_model_supports_prompted_turns_matches_gemini_capabilities() -> None:
@@ -376,11 +456,130 @@ def test_session_runtime_handler_exits_when_room_disconnects() -> None:
     assert len(created_sessions) == 1
     assert created_sessions[0].closed is True
     assert room.disconnect_called is True
-    assert backend_client.closed is True
+    assert backend_client.closed is False
     assert [event["event_type"] for event in backend_client.posted_events] == [
         "worker.connected",
         "agent.session_started",
     ]
+
+
+def test_session_runtime_handler_waits_for_pending_transcripts_before_backend_cleanup() -> None:
+    backend_client = SlowTurnBackendClient()
+    room = FakeRoom()
+
+    def build_fake_session(**kwargs: object) -> FakeAgentSessionWithTranscript:
+        return FakeAgentSessionWithTranscript(**kwargs)
+
+    class FakeRealtimeModel:
+        model = "gemini-2.5-flash-native-audio-preview-12-2025"
+
+    class FakeInterviewAgent:
+        def __init__(self, *args: object, **kwargs: object) -> None:
+            _ = args
+            _ = kwargs
+
+    handler = SessionRuntimeHandler(
+        room_name="interview-room-1",
+        opening_question="Bạn có thể giới thiệu ngắn về bản thân không?",
+        session_id="session-1",
+        jd_id="jd-1",
+        livekit_url="wss://livekit.example",
+        worker_token="worker-token",
+        backend_client=backend_client,
+        config=WorkerConfig(
+            backend_base_url="http://localhost:8000",
+            backend_callback_secret="secret",
+            gemini_api_key="test-key",
+            gemini_model="gemini-2.5-flash-native-audio-preview-12-2025",
+            livekit_url="wss://livekit.example",
+        ),
+        room=room,
+    )
+
+    async def scenario() -> None:
+        with (
+            patch("src.agent.AgentSession", side_effect=build_fake_session),
+            patch("src.agent.build_realtime_model", return_value=FakeRealtimeModel()),
+            patch("src.agent.InterviewRealtimeAgent", FakeInterviewAgent),
+        ):
+            await handler.run()
+            await asyncio.sleep(0.08)
+
+    asyncio.run(scenario())
+
+    assert backend_client.closed_before_turn_finished is False
+    assert len(backend_client.posted_turns) == 1
+    assert backend_client.closed is False
+
+
+def test_session_runtime_handler_completes_wrap_up_when_candidate_disconnects_after_final_answer() -> None:
+    backend_client = FakeBackendClient()
+    backend_client.runtime_state = {
+        "session_id": "session-1",
+        "status": "in_progress",
+        "worker_status": "responding",
+        "provider_status": "gemini_live",
+        "current_question_index": 4,
+        "interview_decision_status": "ready_to_wrap",
+        "needs_hr_review": True,
+        "current_phase": "wrap_up",
+        "company_knowledge_available": False,
+        "current_question": None,
+    }
+    room = FakeRoom()
+
+    def build_fake_session(**kwargs: object) -> FakeAgentSessionCandidateThenDisconnect:
+        return FakeAgentSessionCandidateThenDisconnect(**kwargs)
+
+    class FakeRealtimeModel:
+        model = "gemini-2.5-flash-native-audio-preview-12-2025"
+
+    class FakeInterviewAgent:
+        def __init__(self, *args: object, **kwargs: object) -> None:
+            _ = args
+            _ = kwargs
+
+        def ask_wrap_up(self, *, needs_hr_review: bool = False) -> None:
+            _ = needs_hr_review
+
+    original_sleep = asyncio.sleep
+
+    async def fast_sleep(_: float) -> None:
+        await original_sleep(0)
+
+    handler = SessionRuntimeHandler(
+        room_name="interview-room-1",
+        opening_question="Bạn có thể giới thiệu ngắn về bản thân không?",
+        session_id="session-1",
+        jd_id="jd-1",
+        livekit_url="wss://livekit.example",
+        worker_token="worker-token",
+        backend_client=backend_client,
+        config=WorkerConfig(
+            backend_base_url="http://localhost:8000",
+            backend_callback_secret="secret",
+            gemini_api_key="test-key",
+            gemini_model="gemini-2.5-flash-native-audio-preview-12-2025",
+            livekit_url="wss://livekit.example",
+        ),
+        room=room,
+    )
+
+    async def scenario() -> None:
+        with (
+            patch("src.agent.AgentSession", side_effect=build_fake_session),
+            patch("src.agent.build_realtime_model", return_value=FakeRealtimeModel()),
+            patch("src.agent.InterviewRealtimeAgent", FakeInterviewAgent),
+            patch("src.agent.asyncio.sleep", side_effect=fast_sleep),
+        ):
+            await handler.run()
+
+    asyncio.run(scenario())
+
+    assert backend_client.completed_sessions == [
+        ("session-1", {"reason": "agent_wrap_up"})
+    ]
+    assert "candidate.left" not in [event["event_type"] for event in backend_client.posted_events]
 
 
 def test_prompted_agent_on_enter_resumes_current_question_after_reconnect() -> None:
@@ -410,6 +609,7 @@ def test_prompted_agent_on_enter_resumes_current_question_after_reconnect() -> N
         "current_question_index": 1,
         "interview_decision_status": "continue",
         "current_phase": "competency_validation",
+        "company_knowledge_available": False,
         "current_question": {
             "prompt": {
                 "vi": "Bạn đã xử lý trade-off kỹ thuật đó như thế nào?",
@@ -463,6 +663,7 @@ def test_prompted_agent_on_enter_continues_when_hr_review_flag_is_set() -> None:
         "current_question_index": 1,
         "interview_decision_status": "continue_with_hr_flag",
         "current_phase": "deep_dive",
+        "company_knowledge_available": False,
         "current_question": {
             "question_type": "recovery",
             "prompt": {
@@ -486,6 +687,63 @@ def test_prompted_agent_on_enter_continues_when_hr_review_flag_is_set() -> None:
 
     assert len(fake_session.calls) == 1
     assert "Bạn có thể nói rõ hơn phần việc bạn trực tiếp chịu trách nhiệm không?" in fake_session.calls[0]["instructions"]
+
+
+def test_prompted_agent_on_enter_offers_final_qna_when_company_knowledge_is_available() -> None:
+    class FakeSession:
+        def __init__(self) -> None:
+            self.calls: list[dict[str, str]] = []
+
+        def generate_reply(self, *, instructions: str, input_modality: str) -> None:
+            self.calls.append({
+                "instructions": instructions,
+                "input_modality": input_modality,
+            })
+
+    class FakeRealtimeModel:
+        model = "gemini-2.5-flash-native-audio-preview-12-2025"
+
+    class FakeActivity:
+        def __init__(self, session: FakeSession) -> None:
+            self.session = session
+
+    backend_client = FakeBackendClient()
+    backend_client.runtime_state = {
+        "session_id": "session-1",
+        "status": "in_progress",
+        "worker_status": "responding",
+        "provider_status": "gemini_live",
+        "current_question_index": 4,
+        "interview_decision_status": "ready_to_wrap",
+        "needs_hr_review": False,
+        "current_phase": "wrap_up",
+        "company_knowledge_available": True,
+        "current_question": None,
+    }
+
+    with patch("src.agent.Agent.__init__", return_value=None):
+        agent = InterviewRealtimeAgent(
+            "Bạn có thể giới thiệu ngắn về bản thân không?",
+            FakeRealtimeModel(),
+            backend_client,
+            "session-1",
+        )
+
+    fake_session = FakeSession()
+    agent._activity = FakeActivity(fake_session)
+
+    asyncio.run(agent.on_enter())
+
+    assert len(fake_session.calls) == 1
+    assert "muốn hỏi thêm gì" in fake_session.calls[0]["instructions"].casefold()
+    assert "trước khi kết thúc" in fake_session.calls[0]["instructions"].casefold()
+
+
+def test_final_qna_closing_reply_detection_distinguishes_question_from_goodbye() -> None:
+    assert is_final_qna_closing_reply("Dạ em không còn câu hỏi nữa, cảm ơn chị.")
+    assert is_final_qna_closing_reply("Cảm ơn anh, em ổn rồi ạ.")
+    assert not is_final_qna_closing_reply("Cho em hỏi thêm về team backend hiện tại với ạ?")
+    assert not is_final_qna_closing_reply("Cảm ơn chị, cho em hỏi thêm về lộ trình onboarding được không?")
 
 
 def test_nonprompted_agent_instructions_treat_hr_review_flag_as_continue_state() -> None:

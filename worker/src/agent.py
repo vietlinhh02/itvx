@@ -24,6 +24,38 @@ INTERRUPTION_MIN_WORDS = 2
 FALSE_INTERRUPTION_TIMEOUT_SECONDS = 2.0
 CONTEXT_WINDOW_TRIGGER_TOKENS = 24000
 CONTEXT_WINDOW_TARGET_TOKENS = 12000
+FINAL_QNA_QUESTION_MARKERS = (
+    "?",
+    "cho em hỏi",
+    "cho tôi hỏi",
+    "cho mình hỏi",
+    "em muốn hỏi",
+    "tôi muốn hỏi",
+    "mình muốn hỏi",
+    "xin hỏi",
+    "could i ask",
+    "can i ask",
+    "what ",
+    "how ",
+    "why ",
+    "when ",
+    "where ",
+)
+FINAL_QNA_CLOSING_MARKERS = (
+    "không còn câu hỏi",
+    "không có câu hỏi",
+    "không hỏi thêm",
+    "hết câu hỏi",
+    "hết rồi",
+    "vậy thôi",
+    "ổn rồi",
+    "em rõ rồi",
+    "em hiểu rồi",
+    "ok rồi",
+    "được rồi",
+    "cảm ơn",
+    "xin cảm ơn",
+)
 
 
 def required_runtime_env() -> tuple[str, ...]:
@@ -43,12 +75,25 @@ def model_supports_prompted_turns(model_name: str) -> bool:
     return "3.1" not in model_name
 
 
+def normalize_transcript_text(text: str) -> str:
+    return " ".join(text.casefold().split())
+
+
+def is_final_qna_closing_reply(text: str) -> bool:
+    normalized = normalize_transcript_text(text)
+    if not normalized:
+        return False
+    if any(marker in normalized for marker in FINAL_QNA_QUESTION_MARKERS):
+        return False
+    return any(marker in normalized for marker in FINAL_QNA_CLOSING_MARKERS)
+
+
 def build_realtime_model(config: WorkerConfig) -> google.realtime.RealtimeModel:
     transcription_config = build_audio_transcription_config()
     return google.realtime.RealtimeModel(
         api_key=config.gemini_api_key,
         model=config.gemini_model,
-        voice="Puck",
+        voice=config.gemini_voice,
         language=VIETNAMESE_LANGUAGE_CODE,
         input_audio_transcription=transcription_config,
         output_audio_transcription=build_audio_transcription_config(),
@@ -78,7 +123,7 @@ class TranscriptForwarder:
         self,
         backend_client: BackendClient,
         session_id: str,
-        on_candidate_turn: Callable[[], Awaitable[None]] | None = None,
+        on_candidate_turn: Callable[[str], Awaitable[None]] | None = None,
         on_agent_turn: Callable[[str], Awaitable[None]] | None = None,
         candidate_turn_debounce_seconds: float = 1.8,
         skip_initial_candidate_turn: bool = False,
@@ -93,12 +138,17 @@ class TranscriptForwarder:
         self._seen_message_ids: set[str] = set()
         self._seen_text_keys: set[tuple[str, str]] = set()
         self._pending_candidate_turn_task: asyncio.Task[None] | None = None
+        self._pending_forward_tasks: set[asyncio.Task[None]] = set()
         self._has_forwarded_agent_turn = False
         self._initial_candidate_turn_skipped = False
 
     def attach(self, session: AgentSession) -> None:
         def _handle(event: Any) -> None:
-            asyncio.create_task(self.handle_conversation_item(getattr(event, "item", event)))
+            task = asyncio.create_task(
+                self.handle_conversation_item(getattr(event, "item", event))
+            )
+            self._pending_forward_tasks.add(task)
+            task.add_done_callback(self._pending_forward_tasks.discard)
 
         def _handle_user_state_change(event: Any) -> None:
             if getattr(event, "new_state", None) == "speaking":
@@ -188,7 +238,7 @@ class TranscriptForwarder:
             if speaker == "agent" and self._on_agent_turn is not None:
                 await self._on_agent_turn(text)
             if speaker == "candidate" and self._on_candidate_turn is not None:
-                self._schedule_candidate_turn_trigger(message_id)
+                self._schedule_candidate_turn_trigger(message_id, text)
         except Exception:
             logger.exception("failed to forward transcript turn id=%s role=%s", message_id, role)
 
@@ -211,10 +261,10 @@ class TranscriptForwarder:
         self._sequence_number += 1
         return current
 
-    def _schedule_candidate_turn_trigger(self, message_id: str | None) -> None:
+    def _schedule_candidate_turn_trigger(self, message_id: str | None, text: str) -> None:
         self._cancel_pending_candidate_turn_trigger("new_candidate_transcript")
         self._pending_candidate_turn_task = asyncio.create_task(
-            self._emit_candidate_turn_if_settled(message_id)
+            self._emit_candidate_turn_if_settled(message_id, text)
         )
 
     def _cancel_pending_candidate_turn_trigger(self, reason: str) -> None:
@@ -224,11 +274,11 @@ class TranscriptForwarder:
         self._pending_candidate_turn_task = None
         logger.info("cancelled pending candidate turn trigger reason=%s", reason)
 
-    async def _emit_candidate_turn_if_settled(self, message_id: str | None) -> None:
+    async def _emit_candidate_turn_if_settled(self, message_id: str | None, text: str) -> None:
         try:
             await asyncio.sleep(self._candidate_turn_settle_seconds)
             if self._on_candidate_turn is not None:
-                await self._on_candidate_turn()
+                await self._on_candidate_turn(text)
         except asyncio.CancelledError:
             logger.info("candidate turn trigger cancelled id=%s", message_id)
         except Exception:
@@ -236,6 +286,12 @@ class TranscriptForwarder:
         finally:
             if asyncio.current_task() is self._pending_candidate_turn_task:
                 self._pending_candidate_turn_task = None
+
+    async def aclose(self) -> None:
+        self._cancel_pending_candidate_turn_trigger("forwarder_closed")
+        while self._pending_forward_tasks:
+            pending = tuple(self._pending_forward_tasks)
+            await asyncio.gather(*pending, return_exceptions=True)
 
 
 class SessionRuntimeController:
@@ -373,6 +429,8 @@ class InterviewRealtimeAgent(Agent):
         self._opening_question = opening_question
         self._backend = backend_client
         self._session_id = session_id
+        self._final_qna_active = False
+        self._final_qna_completed = False
 
     def _build_instructions(self, opening_question: str) -> str:
         base = (
@@ -396,6 +454,11 @@ class InterviewRealtimeAgent(Agent):
             + f"{opening_question}. "
             + "Từ lượt trả lời thứ hai của ứng viên trở đi, trước khi hỏi tiếp, hãy gọi tool fetch_interview_runtime_state để lấy đúng trạng thái hiện tại. "
             + "Nếu decision_status là continue, adjust, hoặc continue_with_hr_flag và current_question_vi có giá trị, hãy hỏi đúng current_question_vi, không tự viết lại ý. "
+            + "Nếu decision_status là ready_to_wrap và company_knowledge_available là true, đừng kết thúc ngay. "
+            + "Hãy hỏi ứng viên xem còn muốn hỏi gì thêm về công ty, vị trí, team hoặc bất cứ điều gì khác không. "
+            + "Nếu ứng viên hỏi thêm, hãy trả lời tự nhiên bằng tiếng Việt; câu nào liên quan công ty/team/benefits/policy/process/sản phẩm thì gọi lookup_company_knowledge trước khi trả lời. "
+            + "Sau mỗi câu trả lời, hãy hỏi lại xem ứng viên còn muốn hỏi gì thêm không. "
+            + "Chỉ gọi end_interview khi ứng viên nói rõ là không còn câu hỏi, hoặc chỉ cảm ơn/chào kết thúc mà không hỏi gì thêm. "
             + "Nếu decision_status là ready_to_wrap và needs_hr_review là false, hãy kết thúc lịch sự bằng tiếng Việt rồi gọi tool end_interview với reason='agent_wrap_up'. "
             + "Nếu decision_status là ready_to_wrap và needs_hr_review là true, hãy cảm ơn ứng viên, nói ngắn gọn rằng HR sẽ xem xét thêm sau buổi này, rồi gọi tool end_interview với reason='agent_wrap_up'. "
             + "Nếu bạn vừa trả lời câu hỏi về công ty, hãy gọi fetch_interview_runtime_state rồi quay lại flow phỏng vấn."
@@ -444,6 +507,7 @@ class InterviewRealtimeAgent(Agent):
             "decision_status": payload.get("interview_decision_status"),
             "needs_hr_review": payload.get("needs_hr_review"),
             "current_phase": payload.get("current_phase"),
+            "company_knowledge_available": payload.get("company_knowledge_available"),
             "current_question_vi": current_question_vi,
             "opening_question_vi": self._opening_question,
         }
@@ -473,6 +537,9 @@ class InterviewRealtimeAgent(Agent):
         decision_status = runtime_state.get("interview_decision_status")
         needs_hr_review = bool(runtime_state.get("needs_hr_review"))
         if decision_status == "ready_to_wrap":
+            if self.should_offer_final_qna(runtime_state):
+                self.begin_final_qna()
+                return
             self.ask_wrap_up(needs_hr_review=needs_hr_review)
             return
 
@@ -512,7 +579,42 @@ class InterviewRealtimeAgent(Agent):
         instruction = question if preamble is None else f"{preamble} {question}"
         self.session.generate_reply(instructions=instruction, input_modality="audio")
 
+    def should_offer_final_qna(self, runtime_state: dict[str, object]) -> bool:
+        return (
+            bool(runtime_state.get("company_knowledge_available"))
+            and not self._final_qna_active
+            and not self._final_qna_completed
+        )
+
+    def begin_final_qna(self) -> None:
+        self._final_qna_active = True
+        self.session.generate_reply(
+            instructions=(
+                "Phần đánh giá chính đã xong. Trước khi kết thúc, hãy hỏi tự nhiên bằng tiếng Việt "
+                "xem ứng viên còn muốn hỏi thêm gì về công ty, vị trí, team hoặc bất cứ điều gì khác không."
+            ),
+            input_modality="audio",
+        )
+
+    def answer_final_qna(self) -> None:
+        self._final_qna_active = True
+        self.session.generate_reply(
+            instructions=(
+                "Bạn đang ở pha hỏi đáp cuối. Hãy trả lời trực tiếp câu hỏi vừa rồi của ứng viên "
+                "một cách ngắn gọn, tự nhiên bằng tiếng Việt. Nếu câu hỏi liên quan công ty, team, "
+                "benefits, policy, process hoặc sản phẩm, hãy gọi lookup_company_knowledge trước khi trả lời. "
+                "Bạn có thể trả lời ngoài luồng khi phù hợp. Sau khi trả lời xong, hãy hỏi lại ứng viên "
+                "xem còn muốn hỏi gì thêm không."
+            ),
+            input_modality="audio",
+        )
+
+    def mark_final_qna_completed(self) -> None:
+        self._final_qna_active = False
+        self._final_qna_completed = True
+
     def ask_wrap_up(self, *, needs_hr_review: bool = False) -> None:
+        self.mark_final_qna_completed()
         instructions = (
             "Hãy tóm tắt ngắn gọn rằng bạn đã thu thập đủ tín hiệu chính, hỏi một câu kết nhẹ nếu cần, rồi lịch sự kết thúc buổi phỏng vấn bằng tiếng Việt."
         )
@@ -547,6 +649,7 @@ class SessionRuntimeHandler:
         backend_client: BackendClient,
         config: WorkerConfig,
         room: rtc.Room | None = None,
+        close_backend_on_exit: bool = False,
     ) -> None:
         self._room_name = room_name
         self._opening_question = opening_question
@@ -557,6 +660,7 @@ class SessionRuntimeHandler:
         self._backend = backend_client
         self._config = config
         self._room = room or rtc.Room()
+        self._close_backend_on_exit = close_backend_on_exit
         self._candidate_disconnect_tasks: dict[str, asyncio.Task[None]] = {}
 
     async def run(self) -> None:
@@ -584,7 +688,7 @@ class SessionRuntimeHandler:
             if not completion_fut.done():
                 completion_fut.set_result(None)
 
-        async def _sync_runtime_plan() -> None:
+        async def _sync_runtime_plan(candidate_text: str) -> None:
             nonlocal pending_completion_reason
             if active_agent is None or sync_runtime_plan_lock.locked():
                 return
@@ -594,7 +698,22 @@ class SessionRuntimeHandler:
                 needs_hr_review = bool(runtime_state.get("needs_hr_review"))
                 current_question_index = runtime_state.get("current_question_index", 0)
                 current_question = runtime_state.get("current_question")
+                if bool(getattr(active_agent, "_final_qna_active", False)):
+                    if pending_completion_reason is not None:
+                        return
+                    if is_final_qna_closing_reply(candidate_text):
+                        pending_completion_reason = "agent_wrap_up"
+                        await controller.mark_wrap_up_started()
+                        active_agent.ask_wrap_up(needs_hr_review=needs_hr_review)
+                        return
+                    if hasattr(active_agent, "answer_final_qna"):
+                        active_agent.answer_final_qna()
+                    return
                 if decision_status == "ready_to_wrap":
+                    should_offer_final_qna = getattr(active_agent, "should_offer_final_qna", None)
+                    if callable(should_offer_final_qna) and should_offer_final_qna(runtime_state):
+                        active_agent.begin_final_qna()
+                        return
                     if pending_completion_reason is not None:
                         return
                     pending_completion_reason = "agent_wrap_up"
@@ -644,6 +763,7 @@ class SessionRuntimeHandler:
             logger.info("participant disconnected identity=%s", participant.identity)
 
             async def _complete_after_grace_period() -> None:
+                nonlocal pending_completion_reason
                 try:
                     await asyncio.sleep(10)
                 except asyncio.CancelledError:
@@ -661,6 +781,14 @@ class SessionRuntimeHandler:
                     return
 
                 try:
+                    if pending_completion_reason is not None:
+                        completion_reason = pending_completion_reason
+                        pending_completion_reason = None
+                        await self._backend.complete_session(
+                            self._session_id,
+                            {"reason": completion_reason},
+                        )
+                        return
                     await controller.handle_candidate_left(participant.identity)
                 except Exception:
                     logger.exception(
@@ -749,9 +877,12 @@ class SessionRuntimeHandler:
                 with suppress(Exception):
                     await session.aclose()
             with suppress(Exception):
-                await self._room.disconnect()
+                await transcript_forwarder.aclose()
             with suppress(Exception):
-                await self._backend.aclose()
+                await self._room.disconnect()
+            if self._close_backend_on_exit:
+                with suppress(Exception):
+                    await self._backend.aclose()
             logger.info("runtime cleanup finished room_name=%s session_id=%s", self._room_name, self._session_id)
 
 
@@ -764,6 +895,7 @@ async def main() -> None:
             "GEMINI_LIVE_MODEL",
             os.getenv("GEMINI_MODEL", "gemini-2.5-flash-native-audio-preview-12-2025"),
         ),
+        gemini_voice=os.getenv("GEMINI_LIVE_VOICE", "Aoede"),
         livekit_url=os.getenv("LIVEKIT_URL", "wss://your-project.livekit.cloud"),
     )
 
@@ -781,6 +913,7 @@ async def main() -> None:
         worker_token=os.environ["LIVEKIT_WORKER_TOKEN"],
         backend_client=backend,
         config=config,
+        close_backend_on_exit=True,
     )
     await handler.run()
 

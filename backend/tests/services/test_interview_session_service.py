@@ -12,13 +12,14 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from src.models.background_job import BackgroundJob
 from src.models.cv import CandidateDocument, CandidateProfile, CandidateScreening
 from src.models.interview import InterviewSession
-from src.models.jd import JDAnalysis, JDDocument
+from src.models.jd import JDAnalysis, JDCompanyDocument, JDDocument
 from src.schemas.interview import (
     CandidateJoinRequest,
     CompleteInterviewRequest,
     GenerateInterviewQuestionsRequest,
     InterviewRuntimeEventRequest,
     InterviewSemanticAnswerEvaluation,
+    InterviewScopeConfig,
     ProposeInterviewScheduleRequest,
     PublishInterviewRequest,
     TranscriptTurnRequest,
@@ -321,6 +322,79 @@ async def test_publish_session_creates_room_and_share_token(
     assert detail.plan.questions[0].source is not None
     assert detail.plan.plan_events[-1].event_type == "plan.started"
     assert any(event.event_type == "planning.published" for event in detail.runtime_events)
+
+
+@pytest.mark.asyncio
+async def test_publish_session_respects_hr_selected_scope(
+    db_session: AsyncSession,
+    monkeypatch: MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("LIVEKIT_API_KEY", "test-key-1234567890")
+    monkeypatch.setenv("LIVEKIT_API_SECRET", "test-secret-1234567890-test-secret")
+    screening_id = await seed_completed_screening(db_session)
+    service, _ = build_service(db_session)
+
+    published = await service.publish_interview(
+        PublishInterviewRequest(
+            screening_id=screening_id,
+            approved_questions=["Bạn có thể giới thiệu ngắn về bản thân không?"],
+            interview_scope=InterviewScopeConfig(
+                preset="basic",
+                enabled_competencies=["Communication"],
+            ),
+        )
+    )
+
+    detail = await service.get_session_detail(published.session_id)
+    assert detail.plan is not None
+    assert detail.plan.interview_scope is not None
+    assert detail.plan.interview_scope.enabled_competencies == ["Communication"]
+    assert [item.name.en for item in detail.plan.competencies] == ["Communication"]
+
+
+@pytest.mark.asyncio
+async def test_publish_session_rebinds_generated_question_target_to_selected_scope(
+    db_session: AsyncSession,
+    monkeypatch: MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("LIVEKIT_API_KEY", "test-key-1234567890")
+    monkeypatch.setenv("LIVEKIT_API_SECRET", "test-secret-1234567890-test-secret")
+    screening_id = await seed_completed_screening(db_session)
+    screening = await db_session.get(CandidateScreening, screening_id)
+    assert screening is not None
+    screening_payload = dict(screening.screening_payload)
+    screening_payload["interview_draft"] = {
+        "generated_questions": [
+            {
+                "question_text": "Bạn đã dùng Figma trong công việc như thế nào?",
+                "source": "llm",
+                "rationale": "Probe design tooling.",
+                "target_competency": {"vi": "Figma", "en": "Figma"},
+            }
+        ]
+    }
+    screening.screening_payload = screening_payload
+    await db_session.commit()
+
+    service, _ = build_service(db_session)
+    published = await service.publish_interview(
+        PublishInterviewRequest(
+            screening_id=screening_id,
+            approved_questions=["Bạn đã dùng Figma trong công việc như thế nào?"],
+            interview_scope=InterviewScopeConfig(
+                preset="basic",
+                enabled_competencies=["Communication"],
+            ),
+        )
+    )
+
+    detail = await service.get_session_detail(published.session_id)
+    assert detail.plan is not None
+    assert len(detail.plan.questions) == 1
+    assert detail.plan.questions[0].target_competency is not None
+    assert detail.plan.questions[0].target_competency.en == "Communication"
+    assert detail.plan.questions[0].selection_reason is not None
+    assert "scope" in detail.plan.questions[0].selection_reason.en.lower()
 
 
 @pytest.mark.asyncio
@@ -1334,6 +1408,58 @@ async def test_semantic_evaluator_detects_indirect_capability_gap_and_moves_on(
 
 
 @pytest.mark.asyncio
+async def test_semantic_wrap_up_does_not_close_when_remaining_competencies_are_untouched(
+    db_session: AsyncSession,
+    monkeypatch: MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("LIVEKIT_API_KEY", "test-key-1234567890")
+    monkeypatch.setenv("LIVEKIT_API_SECRET", "test-secret-1234567890-test-secret")
+    screening_id = await seed_completed_screening(db_session)
+    semantic_evaluator = FakeSemanticAnswerEvaluator(
+        responses=[
+            InterviewSemanticAnswerEvaluation(
+                answer_quality="strong",
+                evidence_progress="improved",
+                recommended_action="wrap_up",
+                reason=BilingualText(
+                    vi="Câu trả lời hiện tại khá tốt.",
+                    en="The current answer is strong.",
+                ),
+                confidence=0.96,
+                needs_hr_review=False,
+            )
+        ]
+    )
+    service, _ = build_service(db_session, semantic_evaluator=semantic_evaluator)
+    published = await service.publish_interview(
+        PublishInterviewRequest(
+            screening_id=screening_id,
+            approved_questions=["Bạn hãy giới thiệu ngắn về bản thân."],
+        )
+    )
+
+    await service.append_turn(
+        session_id=published.session_id,
+        payload=TranscriptTurnRequest(
+            speaker="candidate",
+            sequence_number=1,
+            transcript_text=(
+                "Em trực tiếp triển khai rollout cho một service production và theo dõi kết quả sau release."
+            ),
+            provider_event_id="evt-semantic-wrap-up-too-early",
+            event_payload={},
+        ),
+    )
+
+    detail = await service.get_session_detail(published.session_id)
+    assert detail.plan is not None
+    assert detail.plan.interview_decision_status != "ready_to_wrap"
+    assert detail.plan.current_competency_index == 1
+    assert detail.plan.plan_events[-1].chosen_action == "advance_to_next_competency"
+    assert detail.plan.plan_events[-1].decision_rule == "semantic_wrap_up_blocked_remaining_coverage"
+
+
+@pytest.mark.asyncio
 async def test_semantic_evaluator_falls_back_to_heuristics_when_model_errors(
     db_session: AsyncSession,
     monkeypatch: MonkeyPatch,
@@ -1753,6 +1879,43 @@ async def test_runtime_state_hides_current_question_when_ready_to_wrap(
 
 
 @pytest.mark.asyncio
+async def test_runtime_state_reports_company_knowledge_availability(
+    db_session: AsyncSession,
+    monkeypatch: MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("LIVEKIT_API_KEY", "test-key-1234567890")
+    monkeypatch.setenv("LIVEKIT_API_SECRET", "test-secret-1234567890-test-secret")
+    screening_id = await seed_completed_screening(db_session)
+    service, _ = build_service(db_session)
+    published = await service.publish_interview(
+        PublishInterviewRequest(
+            screening_id=screening_id,
+            approved_questions=["Bạn hãy giới thiệu ngắn về bản thân."],
+        )
+    )
+
+    runtime_state = await service.get_runtime_state(published.session_id)
+    assert runtime_state.company_knowledge_available is False
+
+    screening = await db_session.get(CandidateScreening, screening_id)
+    assert screening is not None
+    db_session.add(
+        JDCompanyDocument(
+            jd_document_id=screening.jd_document_id,
+            file_name="company-handbook.pdf",
+            mime_type="application/pdf",
+            storage_path="/tmp/company-handbook.pdf",
+            status="ready",
+            chunk_count=3,
+        )
+    )
+    await db_session.commit()
+
+    runtime_state = await service.get_runtime_state(published.session_id)
+    assert runtime_state.company_knowledge_available is True
+
+
+@pytest.mark.asyncio
 async def test_runtime_state_keeps_current_question_when_continuing_with_hr_flag(
     db_session: AsyncSession,
     monkeypatch: MonkeyPatch,
@@ -2043,6 +2206,59 @@ async def test_last_competency_strong_answer_moves_plan_to_wrap_up(
     assert detail.plan.interview_decision_status == "ready_to_wrap"
     assert detail.plan.next_intended_step is not None
     assert any(event.chosen_action == "prepare_wrap_up" for event in detail.plan.plan_events)
+
+
+@pytest.mark.asyncio
+async def test_last_unresolved_competency_does_not_wrap_up_with_low_coverage(
+    db_session: AsyncSession,
+    monkeypatch: MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("LIVEKIT_API_KEY", "test-key-1234567890")
+    monkeypatch.setenv("LIVEKIT_API_SECRET", "test-secret-1234567890-test-secret")
+    screening_id = await seed_completed_screening(db_session)
+    service, _ = build_service(db_session)
+    published = await service.publish_interview(
+        PublishInterviewRequest(
+            screening_id=screening_id,
+            approved_questions=["Bạn hãy giới thiệu ngắn về bản thân."],
+        )
+    )
+
+    session = await db_session.get(InterviewSession, published.session_id)
+    assert session is not None
+    plan_payload = dict(session.plan_payload)
+    competencies = require_object_list(plan_payload.get("competencies", []))
+    for index, item in enumerate(competencies):
+        if not isinstance(item, dict):
+            continue
+        updated = dict(require_object_dict(cast(object, item)))
+        updated["status"] = "covered" if index < len(competencies) - 1 else "in_progress"
+        updated["current_coverage"] = 1.0 if index < len(competencies) - 1 else 0.12
+        updated["evidence_collected_count"] = 1 if index < len(competencies) - 1 else 0
+        competencies[index] = updated
+    plan_payload["competencies"] = competencies
+    plan_payload["current_competency_index"] = max(len(competencies) - 1, 0)
+    session.plan_payload = plan_payload
+    await db_session.commit()
+
+    await service.append_turn(
+        session_id=published.session_id,
+        payload=TranscriptTurnRequest(
+            speaker="candidate",
+            sequence_number=1,
+            transcript_text="Em chưa có kinh nghiệm thực tế ở phần này nên chưa thể đưa ví dụ cụ thể.",
+            provider_event_id="evt-last-gap-answer",
+            event_payload={},
+        ),
+    )
+
+    detail = await service.get_session_detail(published.session_id)
+    assert detail.plan is not None
+    assert detail.plan.interview_decision_status == "adjust"
+    assert detail.plan.current_phase == "deep_dive"
+    assert detail.plan.next_intended_step is not None
+    assert "Chưa đủ bằng chứng" in detail.plan.next_intended_step.vi
+    assert detail.plan.plan_events[-1].chosen_action == "move_on_from_unresolved_competency"
 
 
 @pytest.mark.asyncio

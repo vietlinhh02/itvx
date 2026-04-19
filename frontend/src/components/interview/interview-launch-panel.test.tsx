@@ -86,6 +86,63 @@ test("publishes interview through same-origin api route", async () => {
   expect(refresh).toHaveBeenCalledTimes(1)
 })
 
+test("publishes the HR-configured interview scope with preset and competency toggles", async () => {
+  const fetchMock = vi.fn()
+    .mockResolvedValueOnce({
+      ok: true,
+      json: async () => ({
+        screening_id: "screening-123",
+        manual_questions: ["Tell me about yourself."],
+        question_guidance: null,
+        generated_questions: [
+          { question_text: "Tell me about yourself.", source: "llm", rationale: null },
+        ],
+      }),
+    })
+    .mockResolvedValueOnce({
+      ok: true,
+      json: async () => ({
+        session_id: "session-123",
+        share_link: "http://localhost:3000/interviews/join/share-token-123",
+        room_name: "interview-room-123",
+        status: "published",
+        schedule: {
+          scheduled_start_at: null,
+          schedule_timezone: "Asia/Ho_Chi_Minh",
+          schedule_status: "unscheduled",
+          schedule_note: null,
+          candidate_proposed_start_at: null,
+          candidate_proposed_note: null,
+        },
+      }),
+    })
+  vi.stubGlobal("fetch", fetchMock)
+
+  render(
+    <InterviewLaunchPanel
+      screeningId="screening-123"
+      jdId="jd-123"
+      accessToken="token-123"
+      backendBaseUrl="http://localhost:8000"
+      availableCompetencies={[
+        { vi: "Backend", en: "Backend" },
+        { vi: "Giao tiếp", en: "Communication" },
+      ]}
+    />
+  )
+
+  const user = userEvent.setup()
+  await user.click(screen.getByRole("button", { name: "Kiến thức cơ bản" }))
+  await user.click(screen.getByLabelText("Backend"))
+  await user.click(screen.getByRole("button", { name: "Tạo câu hỏi" }))
+  await user.click(screen.getByRole("button", { name: "Bắt đầu buổi phỏng vấn" }))
+
+  const generateRequest = fetchMock.mock.calls[0]?.[1]
+  const publishRequest = fetchMock.mock.calls[1]?.[1]
+  expect(generateRequest?.body).toContain('"interview_scope":{"preset":"basic","enabled_competencies":["Communication"]}')
+  expect(publishRequest?.body).toContain('"interview_scope":{"preset":"basic","enabled_competencies":["Communication"]}')
+})
+
 test("publishes interview and persists the selected schedule", async () => {
   const fetchMock = vi.fn()
     .mockResolvedValueOnce({

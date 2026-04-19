@@ -60,6 +60,18 @@ function formatSchedule(value: string | null | undefined) {
   return `${formatVietnamDateTime(value)} (ICT)`
 }
 
+function hasInterviewEnded(detail: InterviewSessionDetailResponse | null) {
+  if (!detail) {
+    return false
+  }
+
+  if (detail.status === "finishing" || detail.status === "completed") {
+    return true
+  }
+
+  return detail.worker_status === "completed" && detail.provider_status === "completed"
+}
+
 export function CandidateJoin({ token, backendBaseUrl }: { token: string; backendBaseUrl: string }) {
   const [joinPayload, setJoinPayload] = useState<CandidateJoinResponse | null>(null)
   const [joinPreview, setJoinPreview] = useState<CandidateJoinPreviewResponse | null>(null)
@@ -173,6 +185,14 @@ export function CandidateJoin({ token, backendBaseUrl }: { token: string; backen
       window.clearInterval(timer)
     }
   }, [apiBaseUrl, joinPayload])
+
+  useEffect(() => {
+    if (!hasInterviewEnded(sessionDetail)) {
+      return
+    }
+
+    markLinkExpired()
+  }, [sessionDetail])
 
   async function handleProposeSchedule() {
     if (!proposedStartAt) {

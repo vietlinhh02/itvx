@@ -104,6 +104,11 @@ class InterviewPolicySummaryPayload(BaseModel):
     recommendation_agreement_rate: float | None = Field(default=None, ge=0.0, le=1.0)
 
 
+class InterviewScopeConfig(BaseModel):
+    preset: Literal["full", "basic", "intro_only"] = "full"
+    enabled_competencies: list[str] = Field(default_factory=list)
+
+
 class InterviewPlanPayload(BaseModel):
     model_config: ClassVar[ConfigDict] = ConfigDict(extra="forbid")
 
@@ -122,6 +127,7 @@ class InterviewPlanPayload(BaseModel):
     policy_version: int | None = Field(default=None, ge=1)
     policy_summary: InterviewPolicySummaryPayload | None = None
     active_policy: InterviewFeedbackPolicyPayload | None = None
+    interview_scope: InterviewScopeConfig | None = None
     questions: list[InterviewQuestion]
 
 
@@ -140,6 +146,7 @@ class GenerateInterviewQuestionsRequest(BaseModel):
     screening_id: str
     manual_questions: list[str] = Field(default_factory=list)
     question_guidance: str | None = None
+    interview_scope: InterviewScopeConfig | None = None
 
 
 class GenerateInterviewQuestionsResponse(BaseModel):
@@ -154,6 +161,7 @@ class PublishInterviewRequest(BaseModel):
     approved_questions: list[str] = Field(min_length=1)
     manual_questions: list[str] = Field(default_factory=list)
     question_guidance: str | None = None
+    interview_scope: InterviewScopeConfig | None = None
 
 
 class InterviewSchedulePayload(BaseModel):
@@ -276,6 +284,7 @@ class InterviewSessionRuntimeStateResponse(BaseModel):
     interview_decision_status: str | None = None
     needs_hr_review: bool = False
     current_phase: str | None = None
+    company_knowledge_available: bool = False
     last_plan_event: InterviewPlanEvent | None = None
 
 

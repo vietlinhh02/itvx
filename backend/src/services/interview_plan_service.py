@@ -15,8 +15,12 @@ from src.schemas.interview import (
     InterviewPlanPayload,
     InterviewQuestion,
     InterviewQuestionCandidate,
+    InterviewScopeConfig,
 )
 from src.schemas.jd import BilingualText
+
+INTERVIEW_SCOPE_INTRO_KEY = "__intro__"
+INTRO_COMPETENCY_NAME = BilingualText(vi="Giới thiệu bản thân", en="Self introduction")
 
 
 def get_current_datetime() -> str:
@@ -31,7 +35,11 @@ class InterviewPlanService:
         """Initialize the service with an optional GenAI client."""
         self._client = client or genai.Client(api_key=settings.gemini_api_key)
 
-    def build_plan(self, screening_payload: dict[str, object]) -> InterviewPlanPayload:
+    def build_plan(
+        self,
+        screening_payload: dict[str, object],
+        interview_scope: InterviewScopeConfig | None = None,
+    ) -> InterviewPlanPayload:
         """Build a baseline interview plan from stored screening data."""
         result = screening_payload.get("result", {})
         if not isinstance(result, Mapping):
@@ -108,7 +116,7 @@ class InterviewPlanService:
                 )
 
         session_goal = self._build_session_goal(result=result, questions=questions)
-        return InterviewPlanPayload(
+        plan = InterviewPlanPayload(
             session_goal=session_goal,
             opening_script=BilingualText(
                 vi="Cảm ơn bạn đã tham gia. Tôi sẽ hỏi một vài câu ngắn dựa trên CV của bạn.",
@@ -143,6 +151,7 @@ class InterviewPlanService:
             plan_events=self._build_plan_events(competencies),
             questions=questions,
         )
+        return self._apply_scope_to_plan(plan, interview_scope)
 
     async def generate_questions(
         self,
@@ -151,12 +160,13 @@ class InterviewPlanService:
         screening_payload: dict[str, object],
         manual_questions: list[str],
         question_guidance: str | None,
+        interview_scope: InterviewScopeConfig | None = None,
     ) -> GenerateInterviewQuestionsResponse:
         """Generate interview questions from HR input and screening evidence."""
         normalized_manual_questions = [
             question.strip() for question in manual_questions if question.strip()
         ]
-        plan = self.build_plan(screening_payload)
+        plan = self.build_plan(screening_payload, interview_scope=interview_scope)
         llm_generated_questions = await self._generate_llm_questions(
             screening_payload=screening_payload,
             plan=plan,
@@ -216,6 +226,40 @@ class InterviewPlanService:
             generated_questions=generated_questions,
         )
 
+    def normalize_question_candidate_for_scope(
+        self,
+        candidate: InterviewQuestionCandidate,
+        plan: InterviewPlanPayload,
+    ) -> InterviewQuestionCandidate:
+        target_competency, was_rebound = self._resolve_scope_target_competency(
+            plan=plan,
+            target_competency=candidate.target_competency,
+        )
+        if target_competency is None:
+            return candidate
+
+        selection_reason = candidate.selection_reason
+        if selection_reason is None or was_rebound:
+            selection_reason = BilingualText(
+                vi=(
+                    "Câu hỏi này được gắn lại vào scope đánh giá mà HR đã bật cho phiên này: "
+                    f"{target_competency.vi}."
+                ),
+                en=(
+                    "This question was aligned to the HR-configured interview scope for this "
+                    f"session: {target_competency.en}."
+                ),
+            )
+
+        evidence_gap = candidate.evidence_gap or self._build_evidence_gap(target_competency)
+        return candidate.model_copy(
+            update={
+                "target_competency": target_competency,
+                "selection_reason": selection_reason,
+                "evidence_gap": evidence_gap,
+            }
+        )
+
     async def _generate_llm_questions(
         self,
         *,
@@ -273,23 +317,26 @@ class InterviewPlanService:
                 else None
             )
             generated_questions.append(
-                InterviewQuestionCandidate(
-                    question_text=question_text.strip(),
-                    source="llm",
-                    rationale=normalized_rationale,
-                    question_type=question_type.strip()
-                    if isinstance(question_type, str) and question_type.strip()
-                    else "planned",
-                    target_competency=BilingualText.model_validate(target_competency)
-                    if isinstance(target_competency, Mapping)
-                    else None,
-                    selection_reason=BilingualText.model_validate(selection_reason)
-                    if isinstance(selection_reason, Mapping)
-                    else None,
-                    priority=priority if isinstance(priority, int) and priority > 0 else 1,
-                    evidence_gap=BilingualText.model_validate(evidence_gap)
-                    if isinstance(evidence_gap, Mapping)
-                    else None,
+                self.normalize_question_candidate_for_scope(
+                    InterviewQuestionCandidate(
+                        question_text=question_text.strip(),
+                        source="llm",
+                        rationale=normalized_rationale,
+                        question_type=question_type.strip()
+                        if isinstance(question_type, str) and question_type.strip()
+                        else "planned",
+                        target_competency=BilingualText.model_validate(target_competency)
+                        if isinstance(target_competency, Mapping)
+                        else None,
+                        selection_reason=BilingualText.model_validate(selection_reason)
+                        if isinstance(selection_reason, Mapping)
+                        else None,
+                        priority=priority if isinstance(priority, int) and priority > 0 else 1,
+                        evidence_gap=BilingualText.model_validate(evidence_gap)
+                        if isinstance(evidence_gap, Mapping)
+                        else None,
+                    ),
+                    plan,
                 )
             )
         return generated_questions or self._fallback_generated_questions(plan, question_guidance)
@@ -365,6 +412,222 @@ class InterviewPlanService:
             vi=f"Xác minh năng lực ưu tiên đầu tiên: {next_competency.vi}.",
             en=f"Validate the highest-priority competency first: {next_competency.en}.",
         )
+
+    def _resolve_enabled_competencies(
+        self,
+        competencies: list[InterviewCompetencyPlan],
+        interview_scope: InterviewScopeConfig,
+    ) -> list[str]:
+        explicit = [item.strip() for item in interview_scope.enabled_competencies if item.strip()]
+        if explicit:
+            return explicit
+        if interview_scope.preset == "intro_only":
+            return [INTERVIEW_SCOPE_INTRO_KEY]
+        competency_names = [item.name.en for item in competencies if item.name.en.strip()]
+        if interview_scope.preset == "basic":
+            return competency_names[:2]
+        return competency_names
+
+    def _build_intro_competency(self) -> InterviewCompetencyPlan:
+        return InterviewCompetencyPlan(
+            name=INTRO_COMPETENCY_NAME,
+            priority=1,
+            target_question_count=1,
+            current_coverage=0.0,
+            status="in_progress",
+            evidence_collected_count=0,
+            evidence_needed=[
+                BilingualText(
+                    vi="Cần câu trả lời mạch lạc về kinh nghiệm phù hợp nhất với vị trí.",
+                    en="Need a clear explanation of the candidate's most relevant experience.",
+                )
+            ],
+            stop_condition=BilingualText(
+                vi="Có đủ ngữ cảnh về bản thân, vai trò gần nhất và mức độ phù hợp ban đầu.",
+                en="Enough context about the candidate, the latest role, and initial relevance is available.",
+            ),
+        )
+
+    def _build_intro_question(self, *, has_more_competencies: bool) -> InterviewQuestion:
+        return InterviewQuestion(
+            question_index=0,
+            dimension_name=INTRO_COMPETENCY_NAME,
+            prompt=BilingualText(
+                vi="Bạn có thể giới thiệu ngắn về bản thân và kinh nghiệm phù hợp nhất với vị trí này không?",
+                en="Can you briefly introduce yourself and the experience most relevant to this role?",
+            ),
+            purpose=BilingualText(
+                vi="Lấy bối cảnh mở đầu để HR hiểu ứng viên muốn được đánh giá theo hướng nào.",
+                en="Collect opening context so HR understands which experience should anchor the interview.",
+            ),
+            source="scope",
+            question_type="intro",
+            rationale="Opening question derived from the HR-configured interview scope.",
+            priority=1,
+            target_competency=INTRO_COMPETENCY_NAME,
+            evidence_gap=BilingualText(
+                vi="Chưa có đủ ngữ cảnh giới thiệu bản thân cho scope phỏng vấn hiện tại.",
+                en="There is not enough self-introduction context for the current interview scope.",
+            ),
+            selection_reason=BilingualText(
+                vi="HR đã cấu hình scope ưu tiên phần giới thiệu bản thân.",
+                en="HR configured this interview scope to prioritize self-introduction.",
+            ),
+            transition_on_strong_answer="advance_to_next_competency" if has_more_competencies else "prepare_wrap_up",
+            transition_on_weak_answer="ask_clarification",
+        )
+
+    def _build_scope_completion_criteria(
+        self,
+        competencies: list[InterviewCompetencyPlan],
+    ) -> list[BilingualText]:
+        if not competencies:
+            return [
+                BilingualText(
+                    vi="Thu thập đủ bối cảnh cho scope phỏng vấn hiện tại trước khi kết thúc session.",
+                    en="Collect enough context for the current interview scope before closing the session.",
+                )
+            ]
+        competency_names = ", ".join(item.name.vi for item in competencies if item.name.vi.strip())
+        return [
+            BilingualText(
+                vi=f"Chỉ cần thu thập đủ bằng chứng cho các năng lực HR đã chọn: {competency_names}.",
+                en=f"Only collect enough evidence for the competencies selected by HR: {competency_names}.",
+            )
+        ]
+
+    def _build_scope_competency_lookup(
+        self,
+        plan: InterviewPlanPayload,
+    ) -> dict[str, BilingualText]:
+        lookup: dict[str, BilingualText] = {}
+        for competency in plan.competencies:
+            normalized_name = competency.name.model_copy(deep=True)
+            for raw_key in {competency.name.en, competency.name.vi}:
+                key = raw_key.strip().casefold()
+                if key:
+                    lookup[key] = normalized_name
+        return lookup
+
+    def _resolve_scope_target_competency(
+        self,
+        *,
+        plan: InterviewPlanPayload,
+        target_competency: BilingualText | None,
+    ) -> tuple[BilingualText | None, bool]:
+        lookup = self._build_scope_competency_lookup(plan)
+        if target_competency is not None:
+            for raw_key in {target_competency.en, target_competency.vi}:
+                key = raw_key.strip().casefold()
+                if key and key in lookup:
+                    return lookup[key].model_copy(deep=True), False
+
+        if not plan.competencies:
+            return target_competency, False
+
+        return plan.competencies[0].name.model_copy(deep=True), True
+
+    def _build_fallback_question_for_competency(
+        self,
+        competency: InterviewCompetencyPlan,
+        *,
+        index: int,
+    ) -> InterviewQuestion:
+        return InterviewQuestion(
+            question_index=index,
+            dimension_name=competency.name,
+            prompt=BilingualText(
+                vi=f"Bạn hãy chia sẻ một ví dụ cụ thể về {competency.name.vi.lower()}.",
+                en=f"Share one concrete example of your {competency.name.en.lower()}.",
+            ),
+            purpose=BilingualText(
+                vi="Xác minh năng lực nằm trong scope HR đã cấu hình.",
+                en="Validate the competency included in the HR-configured scope.",
+            ),
+            source="scope",
+            question_type="planned",
+            rationale="Fallback question derived from the HR-configured scope.",
+            priority=index + 1,
+            target_competency=competency.name,
+            evidence_gap=self._build_evidence_gap(competency.name),
+            selection_reason=BilingualText(
+                vi="Câu hỏi dự phòng được tạo từ competency mà HR đã bật cho phiên này.",
+                en="Fallback question derived from the competency HR enabled for this session.",
+            ),
+            transition_on_strong_answer="advance_to_next_competency",
+            transition_on_weak_answer="ask_clarification",
+        )
+
+    def _apply_scope_to_plan(
+        self,
+        plan: InterviewPlanPayload,
+        interview_scope: InterviewScopeConfig | None,
+    ) -> InterviewPlanPayload:
+        if interview_scope is None:
+            return plan
+
+        enabled_keys = self._resolve_enabled_competencies(plan.competencies, interview_scope)
+        if not enabled_keys:
+            return plan
+
+        competency_by_key = {
+            item.name.en.casefold(): item.model_copy(deep=True)
+            for item in plan.competencies
+            if item.name.en.strip()
+        }
+        question_groups: dict[str, list[InterviewQuestion]] = {}
+        for question in plan.questions:
+            target = question.target_competency or question.dimension_name
+            key = target.en.casefold()
+            question_groups.setdefault(key, []).append(question.model_copy(deep=True))
+
+        scoped_competencies: list[InterviewCompetencyPlan] = []
+        scoped_questions: list[InterviewQuestion] = []
+        for key in enabled_keys:
+            normalized_key = key.casefold()
+            if normalized_key == INTERVIEW_SCOPE_INTRO_KEY:
+                scoped_competencies.append(self._build_intro_competency())
+                continue
+            competency = competency_by_key.get(normalized_key)
+            if competency is not None:
+                scoped_competencies.append(competency)
+                scoped_questions.extend(question_groups.get(normalized_key, []))
+
+        if not scoped_competencies:
+            return plan
+
+        include_intro = any(key.casefold() == INTERVIEW_SCOPE_INTRO_KEY for key in enabled_keys)
+        if include_intro:
+            scoped_questions.insert(
+                0,
+                self._build_intro_question(has_more_competencies=len(scoped_competencies) > 1),
+            )
+
+        if not scoped_questions:
+            scoped_questions = [
+                self._build_fallback_question_for_competency(competency, index=index)
+                for index, competency in enumerate(scoped_competencies)
+            ]
+
+        for index, competency in enumerate(scoped_competencies):
+            competency.priority = index + 1
+            competency.status = "in_progress" if index == 0 else "not_started"
+
+        for index, question in enumerate(scoped_questions):
+            question.question_index = index
+            question.priority = index + 1
+
+        plan.competencies = scoped_competencies
+        plan.questions = scoped_questions
+        plan.current_competency_index = 0
+        plan.current_phase = "competency_validation"
+        plan.interview_scope = interview_scope.model_copy(deep=True)
+        plan.plan_events = self._build_plan_events(scoped_competencies)
+        plan.session_goal = self._build_session_goal(result={}, questions=scoped_questions)
+        plan.overall_strategy = self._build_overall_strategy(scoped_questions)
+        plan.next_intended_step = self._build_next_intended_step(scoped_competencies)
+        plan.completion_criteria = self._build_scope_completion_criteria(scoped_competencies)
+        return plan
 
     def _build_evidence_gap(self, dimension_name: BilingualText) -> BilingualText:
         return BilingualText(
@@ -480,22 +743,25 @@ class InterviewPlanService:
         ]
         if question_guidance and question_guidance.strip():
             generated_questions.append(
-                InterviewQuestionCandidate(
-                    question_text=(
-                        "Bạn hãy chia sẻ ví dụ cụ thể phù hợp với định hướng mà HR đã cấu hình: "
-                        f"{question_guidance.strip()}"
+                self.normalize_question_candidate_for_scope(
+                    InterviewQuestionCandidate(
+                        question_text=(
+                            "Bạn hãy chia sẻ ví dụ cụ thể phù hợp với định hướng mà HR đã cấu hình: "
+                            f"{question_guidance.strip()}"
+                        ),
+                        source="guidance",
+                        rationale="Fallback question derived from HR guidance.",
+                        question_type="planned",
+                        selection_reason=BilingualText(
+                            vi="Câu hỏi dự phòng được suy ra từ định hướng HR.",
+                            en="Fallback question derived from HR guidance.",
+                        ),
+                        evidence_gap=BilingualText(
+                            vi="Cần thêm bằng chứng theo định hướng do HR cấu hình.",
+                            en="Need more evidence aligned with the HR guidance.",
+                        ),
                     ),
-                    source="guidance",
-                    rationale="Fallback question derived from HR guidance.",
-                    question_type="planned",
-                    selection_reason=BilingualText(
-                        vi="Câu hỏi dự phòng được suy ra từ định hướng HR.",
-                        en="Fallback question derived from HR guidance.",
-                    ),
-                    evidence_gap=BilingualText(
-                        vi="Cần thêm bằng chứng theo định hướng do HR cấu hình.",
-                        en="Need more evidence aligned with the HR guidance.",
-                    ),
+                    plan,
                 )
             )
         return generated_questions

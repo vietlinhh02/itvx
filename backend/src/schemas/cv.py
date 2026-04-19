@@ -227,6 +227,7 @@ class InterviewDraftPayload(BaseModel):
     manual_questions: list[str] = Field(default_factory=list)
     question_guidance: str | None = None
     approved_questions: list[str] = Field(default_factory=list)
+    interview_scope: dict[str, object] | None = None
     generated_questions: list[dict[str, object]] = Field(default_factory=list)
 
 

@@ -130,6 +130,7 @@ export function InterviewPhaseContent({
         accessToken={accessToken}
         backendBaseUrl={backendBaseUrl}
         initialDraft={screening.interview_draft ?? null}
+        availableCompetencies={screening.result.dimension_scores.map((item) => item.dimension_name)}
         initialCompanyDocuments={companyDocuments}
         defaultCollapsed={interviewDetail?.status === "completed"}
       />

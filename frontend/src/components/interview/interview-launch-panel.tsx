@@ -18,6 +18,7 @@ import type {
   CompanyKnowledgeDocumentListResponse,
   CompanyKnowledgeDocumentUploadResponse,
   GenerateInterviewQuestionsResponse,
+  InterviewScopeConfig,
   PublishInterviewResponse,
   UpdateInterviewScheduleRequest,
 } from "@/components/interview/interview-types"
@@ -34,12 +35,45 @@ type PublishedInterview = {
   roomName: string
 }
 
+const INTRO_SCOPE_KEY = "__intro__"
+
+const SCOPE_PRESETS = [
+  { id: "full", label: "Đầy đủ" },
+  { id: "basic", label: "Kiến thức cơ bản" },
+  { id: "intro_only", label: "Chỉ giới thiệu" },
+] as const
+
+function buildDefaultScopeSelection(
+  preset: InterviewScopeConfig["preset"],
+  availableCompetencies: Array<{ vi: string; en: string }>,
+) {
+  if (!availableCompetencies.length) {
+    return [INTRO_SCOPE_KEY]
+  }
+  if (preset === "intro_only") {
+    return [INTRO_SCOPE_KEY]
+  }
+  if (preset === "basic") {
+    return availableCompetencies.slice(0, 2).map((item) => item.en)
+  }
+  return availableCompetencies.map((item) => item.en)
+}
+
+function normalizeScopeSelection(
+  selected: string[],
+  availableCompetencies: Array<{ vi: string; en: string }>,
+) {
+  const allowed = new Set([INTRO_SCOPE_KEY, ...availableCompetencies.map((item) => item.en)])
+  return selected.filter((item, index) => item && allowed.has(item) && selected.indexOf(item) === index)
+}
+
 export function InterviewLaunchPanel({
   screeningId,
   jdId,
   accessToken,
   backendBaseUrl,
   initialDraft = null,
+  availableCompetencies = [],
   initialCompanyDocuments = [],
   defaultCollapsed = false,
 }: {
@@ -48,6 +82,7 @@ export function InterviewLaunchPanel({
   accessToken: string
   backendBaseUrl: string
   initialDraft?: InterviewDraft | null
+  availableCompetencies?: Array<{ vi: string; en: string }>
   initialCompanyDocuments?: CompanyKnowledgeDocument[]
   defaultCollapsed?: boolean
 }) {
@@ -57,6 +92,16 @@ export function InterviewLaunchPanel({
   )
   const [questionGuidance, setQuestionGuidance] = useState(initialDraft?.question_guidance ?? "")
   const [approvedQuestions, setApprovedQuestions] = useState<string[]>(initialDraft?.approved_questions ?? [])
+  const [scopePreset, setScopePreset] = useState<InterviewScopeConfig["preset"]>(
+    initialDraft?.interview_scope?.preset ?? "full",
+  )
+  const [enabledCompetencies, setEnabledCompetencies] = useState<string[]>(
+    normalizeScopeSelection(
+      initialDraft?.interview_scope?.enabled_competencies ??
+        buildDefaultScopeSelection(initialDraft?.interview_scope?.preset ?? "full", availableCompetencies),
+      availableCompetencies,
+    ),
+  )
   const [isGenerating, setIsGenerating] = useState(false)
   const [isSubmitting, setIsSubmitting] = useState(false)
   const [isScheduling, setIsScheduling] = useState(false)
@@ -75,6 +120,16 @@ export function InterviewLaunchPanel({
 
   const manualQuestions = useMemo(() => parseQuestionLines(manualQuestionsText), [manualQuestionsText])
   const apiBaseUrl = useMemo(() => resolveApiBaseUrl(backendBaseUrl), [backendBaseUrl])
+  const competencyOptions = useMemo(
+    () => [
+      { key: INTRO_SCOPE_KEY, label: "Giới thiệu bản thân" },
+      ...availableCompetencies.map((item) => ({
+        key: item.en,
+        label: item.vi || item.en,
+      })),
+    ],
+    [availableCompetencies],
+  )
   const preparationSummaryItems = useMemo(() => {
     return [
       approvedQuestions.length
@@ -86,14 +141,27 @@ export function InterviewLaunchPanel({
       companyDocuments.length
         ? `${companyDocuments.length} tài liệu tham chiếu`
         : "Chưa có tài liệu tham chiếu",
+      `${enabledCompetencies.length} scope đánh giá`,
     ]
-  }, [approvedQuestions.length, manualQuestions.length, companyDocuments.length])
+  }, [approvedQuestions.length, manualQuestions.length, companyDocuments.length, enabledCompetencies.length])
 
   useEffect(() => {
     const nextOpen = !defaultCollapsed
     setIsPanelMounted(nextOpen)
     setIsPanelOpen(nextOpen)
   }, [defaultCollapsed])
+
+  useEffect(() => {
+    const nextPreset = initialDraft?.interview_scope?.preset ?? "full"
+    setScopePreset(nextPreset)
+    setEnabledCompetencies(
+      normalizeScopeSelection(
+        initialDraft?.interview_scope?.enabled_competencies ??
+          buildDefaultScopeSelection(nextPreset, availableCompetencies),
+        availableCompetencies,
+      ),
+    )
+  }, [availableCompetencies, initialDraft])
 
   useEffect(() => {
     if (isPanelOpen || !isPanelMounted) {
@@ -108,6 +176,11 @@ export function InterviewLaunchPanel({
   }, [isPanelMounted, isPanelOpen])
 
   async function handleGenerate() {
+    if (!enabledCompetencies.length) {
+      setError("Hãy chọn ít nhất một scope đánh giá trước khi tạo câu hỏi.")
+      return
+    }
+
     setIsGenerating(true)
     setError(null)
     try {
@@ -121,6 +194,10 @@ export function InterviewLaunchPanel({
           screening_id: screeningId,
           manual_questions: manualQuestions,
           question_guidance: questionGuidance.trim() || null,
+          interview_scope: {
+            preset: scopePreset,
+            enabled_competencies: enabledCompetencies,
+          } satisfies InterviewScopeConfig,
         }),
       })
 
@@ -176,6 +253,10 @@ export function InterviewLaunchPanel({
       setError("Hãy tạo hoặc thêm ít nhất một câu hỏi đã duyệt trước khi bắt đầu buổi họp.")
       return
     }
+    if (!enabledCompetencies.length) {
+      setError("Hãy chọn ít nhất một scope đánh giá trước khi bắt đầu buổi phỏng vấn.")
+      return
+    }
 
     setIsSubmitting(true)
     setError(null)
@@ -191,6 +272,10 @@ export function InterviewLaunchPanel({
           approved_questions: approvedQuestions,
           manual_questions: manualQuestions,
           question_guidance: questionGuidance.trim() || null,
+          interview_scope: {
+            preset: scopePreset,
+            enabled_competencies: enabledCompetencies,
+          } satisfies InterviewScopeConfig,
         }),
       })
 
@@ -336,6 +421,17 @@ export function InterviewLaunchPanel({
     })
   }
 
+  function handleScopePresetChange(nextPreset: InterviewScopeConfig["preset"]) {
+    setScopePreset(nextPreset)
+    setEnabledCompetencies(buildDefaultScopeSelection(nextPreset, availableCompetencies))
+  }
+
+  function handleCompetencyToggle(key: string) {
+    setEnabledCompetencies((current) =>
+      current.includes(key) ? current.filter((item) => item !== key) : [...current, key],
+    )
+  }
+
   return (
     <>
       <section className="rounded-[24px] bg-white p-6 shadow-[0px_10px_30px_0px_rgba(15,79,87,0.06)]">
@@ -399,6 +495,45 @@ export function InterviewLaunchPanel({
                 void handleDeleteCompanyDocument(documentId)
               }}
             />
+
+            <section className="rounded-[20px] border border-[var(--color-brand-input-border)] bg-[var(--color-primary-50)]/35 p-5">
+              <p className="text-sm font-medium text-[var(--color-brand-text-muted)]">Scope đánh giá của AI</p>
+              <p className="mt-2 text-sm leading-6 text-[var(--color-brand-text-body)]">
+                AI chỉ hỏi, chấm và quyết định kết thúc dựa trên các scope HR bật ở đây. Scope không chọn sẽ bị bỏ qua hoàn toàn.
+              </p>
+              <div className="mt-4 flex flex-wrap gap-2">
+                {SCOPE_PRESETS.map((preset) => (
+                  <button
+                    key={preset.id}
+                    type="button"
+                    onClick={() => handleScopePresetChange(preset.id)}
+                    className={`rounded-full border px-4 py-2 text-sm font-semibold ${
+                      scopePreset === preset.id
+                        ? "border-[var(--color-brand-primary)] bg-[var(--color-brand-primary)] text-white"
+                        : "border-[var(--color-brand-input-border)] bg-white text-[var(--color-brand-primary)]"
+                    }`}
+                  >
+                    {preset.label}
+                  </button>
+                ))}
+              </div>
+              <div className="mt-4 grid gap-3 md:grid-cols-2">
+                {competencyOptions.map((option) => (
+                  <label
+                    key={option.key}
+                    className="flex items-center gap-3 rounded-[16px] border border-[var(--color-brand-input-border)] bg-white px-4 py-3 text-sm text-[var(--color-brand-text-primary)]"
+                  >
+                    <input
+                      type="checkbox"
+                      className="h-4 w-4 accent-[var(--color-brand-primary)]"
+                      checked={enabledCompetencies.includes(option.key)}
+                      onChange={() => handleCompetencyToggle(option.key)}
+                    />
+                    <span>{option.label}</span>
+                  </label>
+                ))}
+              </div>
+            </section>
 
             <label className="mt-5 block text-sm font-medium text-[var(--color-brand-text-primary)]" htmlFor="manual-questions">
               Câu hỏi thủ công

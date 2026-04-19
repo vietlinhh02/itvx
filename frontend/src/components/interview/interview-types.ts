@@ -29,6 +29,7 @@ export type GenerateInterviewQuestionsRequest = {
   screening_id: string
   manual_questions: string[]
   question_guidance: string | null
+  interview_scope?: InterviewScopeConfig | null
 }
 
 export type GenerateInterviewQuestionsResponse = {
@@ -43,6 +44,12 @@ export type PublishInterviewRequest = {
   approved_questions: string[]
   manual_questions: string[]
   question_guidance: string | null
+  interview_scope?: InterviewScopeConfig | null
+}
+
+export type InterviewScopeConfig = {
+  preset: "full" | "basic" | "intro_only"
+  enabled_competencies: string[]
 }
 
 export type InterviewSchedule = {
@@ -202,6 +209,7 @@ export type InterviewPlan = {
   policy_version?: number | null
   policy_summary?: InterviewPolicySummaryPayload | null
   active_policy?: InterviewFeedbackPolicyPayload | null
+  interview_scope?: InterviewScopeConfig | null
   questions: InterviewQuestion[]
 }
 

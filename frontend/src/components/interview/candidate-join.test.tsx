@@ -106,6 +106,89 @@ test("shows an interview-ended popup when join returns a dead-link response", as
   expect(screen.queryByLabelText("Tên của bạn")).not.toBeInTheDocument()
 })
 
+test("shows the interview-ended popup instead of allowing re-entry when the joined session finishes", async () => {
+  vi.stubGlobal(
+    "fetch",
+    vi.fn()
+      .mockResolvedValueOnce({
+        ok: true,
+        json: async () => ({
+          session_id: "session-1",
+          status: "published",
+          schedule: {
+            scheduled_start_at: null,
+            schedule_timezone: "Asia/Ho_Chi_Minh",
+            schedule_status: "unscheduled",
+            schedule_note: null,
+            candidate_proposed_start_at: null,
+            candidate_proposed_note: null,
+          },
+        }),
+      })
+      .mockResolvedValueOnce({
+        ok: true,
+        json: async () => ({
+          session_id: "session-1",
+          room_name: "interview-room-1",
+          participant_token: "participant-token-1",
+          candidate_identity: "candidate-session-1-nguyen-van-a",
+          schedule: {
+            scheduled_start_at: null,
+            schedule_timezone: "Asia/Ho_Chi_Minh",
+            schedule_status: "unscheduled",
+            schedule_note: null,
+            candidate_proposed_start_at: null,
+            candidate_proposed_note: null,
+          },
+        }),
+      })
+      .mockResolvedValueOnce({
+        ok: true,
+        json: async () => ({
+          session_id: "session-1",
+          status: "completed",
+          worker_status: "completed",
+          provider_status: "completed",
+          livekit_room_name: "interview-room-1",
+          opening_question: "Giới thiệu ngắn về bản thân bạn.",
+          approved_questions: [],
+          manual_questions: [],
+          question_guidance: null,
+          plan: null,
+          current_question_index: 0,
+          total_questions: 0,
+          recommendation: null,
+          schedule: {
+            scheduled_start_at: null,
+            schedule_timezone: "Asia/Ho_Chi_Minh",
+            schedule_status: "unscheduled",
+            schedule_note: null,
+            candidate_proposed_start_at: null,
+            candidate_proposed_note: null,
+          },
+          disconnect_deadline_at: null,
+          last_disconnect_reason: null,
+          last_error_code: null,
+          last_error_message: null,
+          transcript_turns: [],
+          runtime_events: [],
+        }),
+      }),
+  )
+
+  render(<CandidateJoin token="share-token-1" backendBaseUrl="http://localhost:8000" />)
+
+  const user = userEvent.setup()
+  await user.type(screen.getByLabelText("Tên của bạn"), "Nguyen Van A")
+  await user.click(screen.getByRole("button", { name: "Tham gia phỏng vấn" }))
+
+  const dialog = await screen.findByRole("dialog", { name: "Buổi phỏng vấn đã kết thúc" })
+
+  expect(dialog).toBeInTheDocument()
+  expect(screen.queryByTestId("live-room")).not.toBeInTheDocument()
+  expect(screen.queryByRole("button", { name: "Tham gia phỏng vấn" })).not.toBeInTheDocument()
+})
+
 test("submits a candidate schedule proposal to the backend", async () => {
   const fetchMock = vi.fn()
     .mockResolvedValueOnce({
